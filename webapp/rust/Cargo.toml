@@ -11,9 +11,12 @@ axum-extra = { version = "0.8", features = ["cookie-signed", "cookie-key-expansi
 base64 = "0.21"
 bcrypt = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
+flate2 = "1.0.34"
 hyper = "0.14"
 listenfd = "1"
 num-traits = "0.2"
+pprof = { version = "0.13.0", features = ["protobuf-codec"] }
+reqwest = "0.12.9"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 sqlx = { version = "0.7", default-features = false, features = ["macros", "runtime-tokio", "mysql", "rust_decimal"] }
