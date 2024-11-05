@@ -1,0 +1,5 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "/home/belwer99/project/isucon13-try-rust/webapp/rust/Cargo.toml"
+    ],
+}

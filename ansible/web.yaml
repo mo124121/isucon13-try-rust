@@ -1,0 +1,38 @@
+---
+- name: Build and deploy isupipe
+  hosts: localhost
+  tasks:
+    - name: Build isupipe in release mode
+      command: cargo build --release
+      args:
+        chdir: ../webapp/rust
+
+- name: Manage isupipe services and copy binary
+  hosts: isucon_servers
+  become: true
+
+  tasks:
+    - name: Create target directory if it doesn't exist
+      become_user: isucon
+      file:
+        path: /home/isucon/webapp/rust/target/release
+        state: directory
+        mode: '0755'
+
+    - name: Copy isupipe binary
+      become_user: isucon
+      copy:
+        src: ../webapp/rust/target/release/isupipe
+        dest: /home/isucon/webapp/rust/target/release/isupipe
+        mode: "0755"
+
+    - name: Stop isupipe-go service
+      systemd:
+        name: isupipe-go.service
+        state: stopped
+
+    - name: Restart and enable isupipe-rust service
+      systemd:
+        name: isupipe-rust.service
+        state: restarted
+        enabled: true

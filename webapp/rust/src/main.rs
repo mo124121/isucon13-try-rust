@@ -175,7 +175,7 @@ async fn initialize_handler() -> Result<axum::Json<InitializeResponse>, Error> {
             String::from_utf8_lossy(&output.stderr),
         )));
     }
-
+    let _response = reqwest::get("http://isucon-o11y:9000/api/group/collect").await;
     Ok(axum::Json(InitializeResponse { language: "rust" }))
 }
 
