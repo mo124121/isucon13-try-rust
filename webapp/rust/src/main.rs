@@ -7,6 +7,7 @@ use sqlx::mysql::{MySqlConnection, MySqlPool};
 use std::borrow::Cow;
 use std::sync::Arc;
 use uuid::Uuid;
+use hyper::{Client, Uri};
 
 const DEFAULT_SESSION_ID_KEY: &str = "SESSIONID";
 const DEFUALT_SESSION_EXPIRES_KEY: &str = "EXPIRES";
@@ -175,7 +176,12 @@ async fn initialize_handler() -> Result<axum::Json<InitializeResponse>, Error> {
             String::from_utf8_lossy(&output.stderr),
         )));
     }
-    let _response = reqwest::get("http://isucon-o11y:9000/api/group/collect").await;
+    let client = Client::new();
+
+    let _res = client
+        .get(Uri::from_static("http://isucon-o11y:9000/api/group/collect"))
+        .await;
+
     Ok(axum::Json(InitializeResponse { language: "rust" }))
 }
 
