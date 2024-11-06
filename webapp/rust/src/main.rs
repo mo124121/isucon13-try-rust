@@ -132,6 +132,27 @@ async fn pprof_profile_axum(Query(params): Query<ProfileParams>) -> Result<Respo
     }
 }
 
+use sqlx::{mysql::MySql};
+use std::error::Error as StdError;
+
+async fn create_index_if_not_exists(pool: &MySqlPool, query: &str) -> Result<(), Error> {
+    match sqlx::query(query).execute(pool).await {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            // MySQLのエラーコード1061または1060を確認
+            if let Some(mysql_err) = err.as_database_error().and_then(|db_err| db_err.code()) {
+                if mysql_err == "1061" || mysql_err == "1060" {
+                    println!("detected already existing index, but it's ok");
+                    return Ok(());
+                }
+            }
+            // 他のエラーはそのまま返す
+            Err(Error::Sqlx(err))
+        }
+    }
+}
+
+
 #[derive(Debug, serde::Serialize)]
 struct InitializeResponse {
     language: &'static str,
@@ -165,7 +186,7 @@ fn build_mysql_options() -> sqlx::mysql::MySqlConnectOptions {
     options
 }
 
-async fn initialize_handler() -> Result<axum::Json<InitializeResponse>, Error> {
+async fn initialize_handler(State(AppState { pool, .. }): State<AppState>) -> Result<axum::Json<InitializeResponse>, Error> {
     let output = tokio::process::Command::new("../sql/init.sh")
         .output()
         .await?;
@@ -176,8 +197,20 @@ async fn initialize_handler() -> Result<axum::Json<InitializeResponse>, Error> {
             String::from_utf8_lossy(&output.stderr),
         )));
     }
-    let client = Client::new();
+    //DBのインデックス
+    let index_sqls = vec![
+        "CREATE INDEX livestream_id_idx ON livestream_tags (livestream_id);",
+        "CREATE INDEX user_id_idx ON icons (user_id);",
+        "CREATE INDEX user_id_idx ON themes (user_id);",
+    ];
 
+    for sql in &index_sqls {
+        if let Err(err) = create_index_if_not_exists(&pool, sql).await {
+            return Err(err);
+        }
+    }
+    //測定開始
+    let client = Client::new();
     let _res = client
         .get(Uri::from_static("http://isucon-o11y:9000/api/group/collect"))
         .await;
