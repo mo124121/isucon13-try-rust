@@ -1211,6 +1211,7 @@ dependencies = [
  "bcrypt",
  "chrono",
  "flate2",
+ "hex",
  "hyper",
  "listenfd",
  "num-traits",

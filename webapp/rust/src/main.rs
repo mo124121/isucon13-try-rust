@@ -1,10 +1,14 @@
 use async_session::{CookieStore, SessionStore};
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, request, HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum_extra::extract::cookie::SignedCookieJar;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use hyper::{Client, Uri};
+use sha2::{Digest, Sha256};
 use sqlx::mysql::{MySqlConnection, MySqlPool};
+use sqlx::Transaction;
 use std::borrow::Cow;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -86,7 +90,7 @@ impl axum::extract::FromRef<AppState> for axum_extra::extract::cookie::Key {
 // cargo add flate2
 // cargo add pprof -F protobuf-codec
 //
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use pprof::protos::Message;
@@ -1525,12 +1529,32 @@ struct PostIconResponse {
     id: i64,
 }
 
+fn calc_sha256(image: &Vec<u8>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(image);
+    let result = hasher.finalize();
+    let hash_string = hex::encode(result);
+    return hash_string;
+}
+
+async fn get_hash(
+    mut tx: Transaction<'static, sqlx::MySql>,
+    user_id: i64,
+) -> Result<String, Error> {
+    let image: Vec<u8> = sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap();
+    let hash_string = calc_sha256(&image);
+    Ok(hash_string)
+}
+
 async fn get_icon_handler(
     State(AppState { pool, .. }): State<AppState>,
     Path((username,)): Path<(String,)>,
-) -> Result<axum::response::Response, Error> {
-    use axum::response::IntoResponse as _;
-
+    headers: HeaderMap,
+) -> Result<Response, Error> {
     let mut tx = pool.begin().await?;
 
     let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
@@ -1543,15 +1567,37 @@ async fn get_icon_handler(
         .fetch_optional(&mut *tx)
         .await?;
 
-    let headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
-    if let Some(image) = image {
-        Ok((headers, image).into_response())
+    // アイコン画像が存在する場合、ハッシュを計算
+    if let Some(image_data) = image {
+        let hash_string = calc_sha256(&image_data);
+
+        // リクエストヘッダーからIf-None-Matchを取得
+        if let Some(if_none_match) = headers.get(axum::http::header::IF_NONE_MATCH) {
+            if let Ok(if_none_match_str) = if_none_match.to_str() {
+                let if_none_match_str = if_none_match_str.trim_matches('"');
+                // ハッシュを比較
+                if if_none_match_str == hash_string {
+                    // 一致する場合は304 Not Modifiedを返す
+                    return Ok(Response::builder()
+                        .status(StatusCode::NOT_MODIFIED)
+                        .body(Body::empty())
+                        .unwrap()
+                        .into_response());
+                }
+            }
+        }
+
+        // ヘッダーを設定して画像を返す
+        let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
+        return Ok((response_headers, image_data).into_response());
     } else {
+        // アイコンが存在しない場合はフォールバック画像を返す
         let file = tokio::fs::File::open(FALLBACK_IMAGE).await.unwrap();
         let stream = tokio_util::io::ReaderStream::new(file);
         let body = axum::body::StreamBody::new(stream);
 
-        Ok((headers, body).into_response())
+        let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
+        return Ok((response_headers, body).into_response());
     }
 }
 
