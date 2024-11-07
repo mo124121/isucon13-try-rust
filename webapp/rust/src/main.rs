@@ -8,9 +8,11 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use hyper::{Client, Uri};
 use sha2::{Digest, Sha256};
 use sqlx::mysql::{MySqlConnection, MySqlPool};
-use sqlx::Transaction;
+use sqlx::{Acquire, Executor, MySql, Pool, Transaction};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::{Mutex, OnceCell};
 use uuid::Uuid;
 
 pub mod utils;
@@ -20,6 +22,8 @@ const DEFUALT_SESSION_EXPIRES_KEY: &str = "EXPIRES";
 const DEFAULT_USER_ID_KEY: &str = "USERID";
 const DEFAULT_USERNAME_KEY: &str = "USERNAME";
 const FALLBACK_IMAGE: &str = "../img/NoImage.jpg";
+
+static ONCE: OnceCell<String> = OnceCell::const_new();
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -79,6 +83,8 @@ struct AppState {
     pool: MySqlPool,
     key: axum_extra::extract::cookie::Key,
     powerdns_subdomain_address: Arc<String>,
+    username_usermodel_cache: Arc<Mutex<HashMap<String, UserModel>>>,
+    iconhash_cache: Arc<Mutex<HashMap<i64, String>>>,
 }
 impl axum::extract::FromRef<AppState> for axum_extra::extract::cookie::Key {
     fn from_ref(state: &AppState) -> Self {
@@ -172,7 +178,12 @@ fn build_mysql_options() -> sqlx::mysql::MySqlConnectOptions {
 }
 
 async fn initialize_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(AppState {
+        pool,
+        username_usermodel_cache,
+        iconhash_cache,
+        ..
+    }): State<AppState>,
 ) -> Result<axum::Json<InitializeResponse>, Error> {
     let output = tokio::process::Command::new("../sql/init.sh")
         .output()
@@ -190,6 +201,13 @@ async fn initialize_handler(
         "CREATE INDEX user_id_idx ON icons (user_id);",
         "CREATE INDEX user_id_idx ON themes (user_id);",
     ];
+    //cacheのクリア
+    {
+        let mut username_usermodel_cache = username_usermodel_cache.lock().await;
+        username_usermodel_cache.clear();
+        let mut iconhash_cache = iconhash_cache.lock().await;
+        iconhash_cache.clear();
+    }
 
     for sql in &index_sqls {
         if let Err(err) = utils::db::create_index_if_not_exists(&pool, sql).await {
@@ -339,6 +357,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pool,
             key: axum_extra::extract::cookie::Key::derive_from(&secret),
             powerdns_subdomain_address: Arc::new(powerdns_subdomain_address),
+            username_usermodel_cache: Arc::new(Mutex::new(HashMap::new())),
+            iconhash_cache: Arc::new(Mutex::new(HashMap::new())),
         })
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
@@ -1449,7 +1469,7 @@ async fn fill_reaction_response(
     })
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct UserModel {
     id: i64,
     name: String,
@@ -1537,72 +1557,154 @@ fn calc_sha256(image: &Vec<u8>) -> String {
     return hash_string;
 }
 
-async fn get_hash(
-    mut tx: Transaction<'static, sqlx::MySql>,
-    user_id: i64,
-) -> Result<String, Error> {
-    let image: Vec<u8> = sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .unwrap();
-    let hash_string = calc_sha256(&image);
-    Ok(hash_string)
+async fn get_fallback_icon_hash() -> String {
+    let fallback_image_data = tokio::fs::read(FALLBACK_IMAGE).await.unwrap();
+    calc_sha256(&fallback_image_data)
 }
 
+async fn get_hash(
+    conn: &mut MySqlConnection,
+    iconhash_cache: Arc<Mutex<HashMap<i64, String>>>,
+    user_id: i64,
+) -> Result<String, Error> {
+    {
+        let iconhash_cache = iconhash_cache.lock().await;
+        if let Some(hash) = iconhash_cache.get(&user_id) {
+            return Ok(hash.clone());
+        }
+    }
+
+    // データベースから画像を取得
+    let image: Option<Vec<u8>> = sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+
+    // 画像が存在しない場合のエラーハンドリング
+    let image = match image {
+        Some(image) => image,
+        None => {
+            return Err(Error::NotFound("".into()));
+        }
+    };
+
+    // SHA-256ハッシュを計算
+    let hash = calc_sha256(&image);
+
+    // キャッシュにハッシュを追加
+    {
+        let mut iconhash_cache = iconhash_cache.lock().await;
+        iconhash_cache.insert(user_id, hash.clone());
+    }
+
+    Ok(hash)
+}
+
+async fn get_user_model(
+    conn: &mut MySqlConnection,
+    username_usermodel_cache: Arc<Mutex<HashMap<String, UserModel>>>,
+    username: String,
+) -> Result<UserModel, Error> {
+    {
+        let username_usermodel_cache = username_usermodel_cache.lock().await;
+        if let Some(user) = username_usermodel_cache.get(&username) {
+            return Ok(user.clone());
+        }
+    }
+
+    // トランザクションを使用してユーザーを取得
+    let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
+        .bind(&username)
+        .fetch_one(&mut *conn) // 引数として渡す
+        .await?;
+
+    // キャッシュに追加
+    {
+        let mut username_usermodel_cache = username_usermodel_cache.lock().await;
+        username_usermodel_cache.insert(username.clone(), user.clone());
+    }
+    Ok(user)
+}
 async fn get_icon_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(AppState {
+        pool,
+        username_usermodel_cache,
+        iconhash_cache,
+        ..
+    }): State<AppState>,
     Path((username,)): Path<(String,)>,
     headers: HeaderMap,
 ) -> Result<Response, Error> {
     let mut tx = pool.begin().await?;
 
-    let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
-        .bind(username)
-        .fetch_one(&mut *tx)
-        .await?;
+    let user = get_user_model(&mut *tx, username_usermodel_cache, username).await?;
 
-    let image: Option<Vec<u8>> = sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
-        .bind(user.id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    // 通常のアイコン画像のハッシュを取得
+    let hash = match get_hash(&mut *tx, iconhash_cache, user.id).await {
+        Ok(hash) => hash,
+        Err(e) => {
+            // フォールバックアイコンのハッシュを取得
+            let fallback_hash = ONCE.get_or_init(get_fallback_icon_hash).await;
+            let hash = fallback_hash.clone();
 
-    // アイコン画像が存在する場合、ハッシュを計算
-    if let Some(image_data) = image {
-        let hash_string = calc_sha256(&image_data);
-
-        // リクエストヘッダーからIf-None-Matchを取得
-        if let Some(if_none_match) = headers.get(axum::http::header::IF_NONE_MATCH) {
-            if let Ok(if_none_match_str) = if_none_match.to_str() {
-                let if_none_match_str = if_none_match_str.trim_matches('"');
-                // ハッシュを比較
-                if if_none_match_str == hash_string {
-                    // 一致する場合は304 Not Modifiedを返す
-                    return Ok(Response::builder()
-                        .status(StatusCode::NOT_MODIFIED)
-                        .body(Body::empty())
-                        .unwrap()
-                        .into_response());
+            // リクエストヘッダーからIf-None-Matchを取得
+            if let Some(if_none_match) = headers.get(axum::http::header::IF_NONE_MATCH) {
+                if let Ok(if_none_match_str) = if_none_match.to_str() {
+                    let if_none_match_str = if_none_match_str.trim_matches('"');
+                    // ハッシュを比較
+                    if if_none_match_str == hash {
+                        // 一致する場合は304 Not Modifiedを返す
+                        return Ok(Response::builder()
+                            .status(StatusCode::NOT_MODIFIED)
+                            .body(Body::empty())
+                            .unwrap()
+                            .into_response());
+                    }
                 }
             }
+
+            // フォールバック画像を返す
+            let stream =
+                tokio_util::io::ReaderStream::new(tokio::fs::File::open(FALLBACK_IMAGE).await?);
+            let body = axum::body::StreamBody::new(stream);
+            let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
+            return Ok((response_headers, body).into_response());
         }
+    };
 
-        // ヘッダーを設定して画像を返す
-        let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
-        return Ok((response_headers, image_data).into_response());
-    } else {
-        // アイコンが存在しない場合はフォールバック画像を返す
-        let file = tokio::fs::File::open(FALLBACK_IMAGE).await.unwrap();
-        let stream = tokio_util::io::ReaderStream::new(file);
-        let body = axum::body::StreamBody::new(stream);
-
-        let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
-        return Ok((response_headers, body).into_response());
+    // リクエストヘッダーからIf-None-Matchを取得
+    if let Some(if_none_match) = headers.get(axum::http::header::IF_NONE_MATCH) {
+        if let Ok(if_none_match_str) = if_none_match.to_str() {
+            let if_none_match_str = if_none_match_str.trim_matches('"');
+            // ハッシュを比較
+            if if_none_match_str == hash {
+                // 一致する場合は304 Not Modifiedを返す
+                return Ok(Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .body(Body::empty())
+                    .unwrap()
+                    .into_response());
+            }
+        }
     }
+
+    // 通常のアイコン画像を返す
+    let image_data: Vec<u8> = sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NotFound("Icon not found".into()))?; // アイコンが見つからない場合のエラーハンドリング
+
+    let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
+    Ok((response_headers, image_data).into_response())
 }
 
 async fn post_icon_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(AppState {
+        pool,
+        iconhash_cache,
+        ..
+    }): State<AppState>,
     jar: SignedCookieJar,
     axum::Json(req): axum::Json<PostIconRequest>,
 ) -> Result<(StatusCode, axum::Json<PostIconResponse>), Error> {
@@ -1630,6 +1732,11 @@ async fn post_icon_handler(
     let icon_id = rs.last_insert_id() as i64;
 
     tx.commit().await?;
+
+    {
+        let mut iconhash_cache = iconhash_cache.lock().await;
+        iconhash_cache.remove(&user_id);
+    }
 
     Ok((
         StatusCode::CREATED,
