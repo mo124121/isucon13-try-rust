@@ -2225,37 +2225,47 @@ async fn get_user_statistics_handler(
         .ok_or(Error::BadRequest("".into()))?;
 
     // ランク算出
-    let users: Vec<UserModel> = sqlx::query_as("SELECT * FROM users")
-        .fetch_all(&mut *tx)
-        .await?;
+    let query = r#"
+    SELECT u.name, 
+           COALESCE(SUM(r.reactions), 0) AS total_reactions,
+           COALESCE(SUM(lc.count), 0) AS total_comments,
+           COALESCE(SUM(lc.tip), 0) AS total_tips
+    FROM users u
+    LEFT JOIN livestreams l ON l.user_id = u.id
+    LEFT JOIN (
+        SELECT livestream_id, COUNT(*) AS reactions
+        FROM reactions
+        GROUP BY livestream_id
+    ) r ON l.id = r.livestream_id
+    LEFT JOIN (
+        SELECT livestream_id, SUM(tip) AS tip, COUNT(*) AS count
+        FROM livecomments
+        GROUP BY livestream_id
+    ) lc ON l.id = lc.livestream_id
+    GROUP BY u.id
+    "#;
 
+    let user_stats: Vec<(String, MysqlDecimal, MysqlDecimal, MysqlDecimal)> =
+        sqlx::query_as(query).fetch_all(&mut *tx).await?;
+
+    let mut total_livecomments = 0;
+    let mut total_tip = 0;
+    let mut total_reactions = 0;
     let mut ranking = Vec::new();
-    for user in users {
-        let query = r#"
-        SELECT COUNT(*) FROM users u
-        INNER JOIN livestreams l ON l.user_id = u.id
-        INNER JOIN reactions r ON r.livestream_id = l.id
-        WHERE u.id = ?
-        "#;
-        let MysqlDecimal(reactions) = sqlx::query_scalar(query)
-            .bind(user.id)
-            .fetch_one(&mut *tx)
-            .await?;
+    for (name, reaction, comment, tip) in user_stats {
+        let reaction = i64::from(reaction);
+        let comment = i64::from(comment);
+        let tip = i64::from(tip);
+        let score = reaction + tip;
 
-        let query = r#"
-        SELECT IFNULL(SUM(l2.tip), 0) FROM users u
-        INNER JOIN livestreams l ON l.user_id = u.id
-        INNER JOIN livecomments l2 ON l2.livestream_id = l.id
-        WHERE u.id = ?
-        "#;
-        let MysqlDecimal(tips) = sqlx::query_scalar(query)
-            .bind(user.id)
-            .fetch_one(&mut *tx)
-            .await?;
+        if (name == username) {
+            total_livecomments = comment;
+            total_tip = tip;
+            total_reactions = reaction;
+        }
 
-        let score = reactions + tips;
         ranking.push(UserRankingEntry {
-            username: user.name,
+            username: name,
             score,
         });
     }
@@ -2271,51 +2281,17 @@ async fn get_user_statistics_handler(
         .unwrap();
     let rank = (ranking.len() - rpos) as i64;
 
-    // リアクション数
+    // 合計視聴者数
     let query = r"#
     SELECT COUNT(*) FROM users u
     INNER JOIN livestreams l ON l.user_id = u.id
-    INNER JOIN reactions r ON r.livestream_id = l.id
-    WHERE u.name = ?
+    INNER JOIN livestream_viewers_history h ON h.livestream_id = l.id
+    WHERE u.id = ?
     #";
-    let MysqlDecimal(total_reactions) = sqlx::query_scalar(query)
-        .bind(&username)
+    let MysqlDecimal(viewers_count) = sqlx::query_scalar(query)
+        .bind(&user.id)
         .fetch_one(&mut *tx)
         .await?;
-
-    // ライブコメント数、チップ合計
-    let mut total_livecomments = 0;
-    let mut total_tip = 0;
-    let livestreams: Vec<LivestreamModel> =
-        sqlx::query_as("SELECT * FROM livestreams WHERE user_id = ?")
-            .bind(user.id)
-            .fetch_all(&mut *tx)
-            .await?;
-
-    for livestream in &livestreams {
-        let livecomments: Vec<LivecommentModel> =
-            sqlx::query_as("SELECT * FROM livecomments WHERE livestream_id = ?")
-                .bind(livestream.id)
-                .fetch_all(&mut *tx)
-                .await?;
-
-        for livecomment in livecomments {
-            total_tip += livecomment.tip;
-            total_livecomments += 1;
-        }
-    }
-
-    // 合計視聴者数
-    let mut viewers_count = 0;
-    for livestream in livestreams {
-        let MysqlDecimal(cnt) = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM livestream_viewers_history WHERE livestream_id = ?",
-        )
-        .bind(livestream.id)
-        .fetch_one(&mut *tx)
-        .await?;
-        viewers_count += cnt;
-    }
 
     // お気に入り絵文字
     let query = r#"
