@@ -208,6 +208,8 @@ async fn initialize_handler(
         "CREATE INDEX livestream_id_idx ON livestream_tags (livestream_id);",
         "CREATE INDEX user_id_idx ON icons (user_id);",
         "CREATE INDEX user_id_idx ON themes (user_id);",
+        "CREATE INDEX user_id_idx ON livestreams (user_id);",
+        "CREATE INDEX livestream_id_idx ON livecomments (livestream_id)",
     ];
     //cacheのクリア
     {
@@ -2351,35 +2353,41 @@ async fn get_livestream_statistics_handler(
 
     let mut tx = pool.begin().await?;
 
-    let _: LivestreamModel = sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
-        .bind(livestream_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::BadRequest("".into()))?;
-
-    let livestreams: Vec<LivestreamModel> = sqlx::query_as("SELECT * FROM livestreams")
-        .fetch_all(&mut *tx)
-        .await?;
-
     // ランク算出
-    let mut ranking = Vec::new();
-    for livestream in livestreams {
-        let MysqlDecimal(reactions) = sqlx::query_scalar("SELECT COUNT(*) FROM livestreams l INNER JOIN reactions r ON l.id = r.livestream_id WHERE l.id = ?")
-            .bind(livestream.id)
-            .fetch_one(&mut *tx)
-            .await?;
+    // ランキングを一度のクエリで取得
+    let livestreams: Vec<(MysqlDecimal, MysqlDecimal, MysqlDecimal)> = sqlx::query_as(
+        "
+        SELECT l.id AS livestream_id,
+               COALESCE(SUM(r.reactions), 0) AS total_reactions,
+               COALESCE(SUM(lc.tip), 0) AS total_tips
+        FROM livestreams l
+        LEFT JOIN (
+            SELECT livestream_id, COUNT(*) AS reactions
+            FROM reactions
+            GROUP BY livestream_id
+        ) r ON l.id = r.livestream_id
+        LEFT JOIN (
+            SELECT livestream_id, SUM(tip) AS tip
+            FROM livecomments
+            GROUP BY livestream_id
+        ) lc ON l.id = lc.livestream_id
+        GROUP BY l.id
+        ",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
 
-        let MysqlDecimal(total_tips) = sqlx::query_scalar("SELECT IFNULL(SUM(l2.tip), 0) FROM livestreams l INNER JOIN livecomments l2 ON l.id = l2.livestream_id WHERE l.id = ?")
-            .bind(livestream.id)
-            .fetch_one(&mut *tx)
-            .await?;
-
-        let score = reactions + total_tips;
-        ranking.push(LivestreamRankingEntry {
-            livestream_id: livestream.id,
-            score,
+    // スコアを計算し、ランキングを作成
+    let mut ranking: Vec<LivestreamRankingEntry> = livestreams
+        .into_iter()
+        .map(|(livestream_id, reaction, tip)| {
+            let score = i64::from(reaction) + i64::from(tip);
+            LivestreamRankingEntry {
+                livestream_id: i64::from(livestream_id),
+                score,
+            }
         })
-    }
+        .collect();
     ranking.sort_by(|a, b| {
         a.score
             .cmp(&b.score)
