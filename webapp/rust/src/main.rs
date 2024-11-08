@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use sqlx::mysql::{MySqlConnection, MySqlPool};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::{Mutex, OnceCell};
 use uuid::Uuid;
 
@@ -23,7 +23,12 @@ const DEFAULT_USERNAME_KEY: &str = "USERNAME";
 const FALLBACK_IMAGE: &str = "../img/NoImage.jpg";
 
 static ONCE: OnceCell<String> = OnceCell::const_new();
-
+static LIVESTREAM_TAGS_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, Vec<LivestreamTagModel>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static USER_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, UserModel>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static TAG_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, TagModel>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("I/O error: {0}")]
@@ -206,6 +211,12 @@ async fn initialize_handler(
         username_usermodel_cache.clear();
         let mut iconhash_cache = iconhash_cache.lock().await;
         iconhash_cache.clear();
+        let mut tag_cache = LIVESTREAM_TAGS_MODEL_CACHE.lock().await;
+        tag_cache.clear();
+        let mut user_model_cache = USER_MODEL_CACHE.lock().await;
+        user_model_cache.clear();
+        let mut tag_model_cache = TAG_MODEL_CACHE.lock().await;
+        tag_model_cache.clear();
     }
 
     for sql in &index_sqls {
@@ -380,7 +391,7 @@ struct Tag {
     name: String,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct TagModel {
     id: i64,
     name: String,
@@ -480,7 +491,7 @@ struct Livestream {
     end_at: i64,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct LivestreamTagModel {
     #[allow(unused)]
     id: i64,
@@ -911,29 +922,79 @@ async fn get_livecomment_reports_handler(
     Ok(axum::Json(reports))
 }
 
+async fn get_livestream_tags(
+    tx: &mut MySqlConnection,
+    livestream_id: i64,
+) -> sqlx::Result<Vec<LivestreamTagModel>> {
+    {
+        let cache = LIVESTREAM_TAGS_MODEL_CACHE.lock().await;
+        if let Some(tag) = cache.get(&livestream_id) {
+            return Ok(tag.clone());
+        }
+    }
+    let livestream_tag_models: Vec<LivestreamTagModel> =
+        sqlx::query_as("SELECT * FROM livestream_tags WHERE livestream_id = ?")
+            .bind(livestream_id)
+            .fetch_all(&mut *tx)
+            .await?;
+
+    {
+        let mut cache = LIVESTREAM_TAGS_MODEL_CACHE.lock().await;
+        cache.insert(livestream_id, livestream_tag_models.to_vec());
+    }
+    Ok(livestream_tag_models)
+}
+
+async fn get_user_model(tx: &mut MySqlConnection, user_id: i64) -> sqlx::Result<UserModel> {
+    {
+        let cache = USER_MODEL_CACHE.lock().await;
+        if let Some(user) = cache.get(&user_id) {
+            return Ok(user.clone());
+        }
+    }
+    let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    {
+        let mut cache = USER_MODEL_CACHE.lock().await;
+        cache.insert(user_id, user.clone());
+    }
+    Ok(user)
+}
+async fn get_tag_model(tx: &mut MySqlConnection, tag_id: i64) -> sqlx::Result<TagModel> {
+    {
+        let cache = TAG_MODEL_CACHE.lock().await;
+        if let Some(tag) = cache.get(&tag_id) {
+            return Ok(tag.clone());
+        }
+    }
+    let tag: TagModel = sqlx::query_as("SELECT * FROM tags WHERE id = ?")
+        .bind(tag_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    {
+        let mut cache = TAG_MODEL_CACHE.lock().await;
+        cache.insert(tag_id, tag.clone());
+    }
+    Ok(tag)
+}
+
 async fn fill_livestream_response(
     tx: &mut MySqlConnection,
     iconhash_cache: &Arc<Mutex<HashMap<i64, String>>>,
     livestream_model: LivestreamModel,
 ) -> sqlx::Result<Livestream> {
-    let owner_model: UserModel = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(livestream_model.user_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let owner_model = get_user_model(&mut *tx, livestream_model.user_id).await?;
     let owner = fill_user_response(tx, iconhash_cache, owner_model).await?;
 
-    let livestream_tag_models: Vec<LivestreamTagModel> =
-        sqlx::query_as("SELECT * FROM livestream_tags WHERE livestream_id = ?")
-            .bind(livestream_model.id)
-            .fetch_all(&mut *tx)
-            .await?;
+    let livestream_tag_models = get_livestream_tags(&mut *tx, livestream_model.id).await?;
 
     let mut tags = Vec::with_capacity(livestream_tag_models.len());
     for livestream_tag_model in livestream_tag_models {
-        let tag_model: TagModel = sqlx::query_as("SELECT * FROM tags WHERE id = ?")
-            .bind(livestream_tag_model.tag_id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let tag_model = get_tag_model(&mut *tx, livestream_tag_model.tag_id).await?;
         tags.push(Tag {
             id: tag_model.id,
             name: tag_model.name,
@@ -1657,7 +1718,7 @@ async fn get_hash(
     Ok(hash)
 }
 
-async fn get_user_model(
+async fn get_user_model_from_name(
     conn: &mut MySqlConnection,
     username_usermodel_cache: Arc<Mutex<HashMap<String, UserModel>>>,
     username: String,
@@ -1694,7 +1755,7 @@ async fn get_icon_handler(
 ) -> Result<Response, Error> {
     let mut tx = pool.begin().await?;
 
-    let user = get_user_model(&mut *tx, username_usermodel_cache, username).await?;
+    let user = get_user_model_from_name(&mut *tx, username_usermodel_cache, username).await?;
 
     // 通常のアイコン画像のハッシュを取得
     let hash = match get_hash(&mut *tx, &iconhash_cache, user.id).await {
