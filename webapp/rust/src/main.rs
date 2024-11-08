@@ -27,6 +27,8 @@ static LIVESTREAM_TAGS_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, Vec<LivestreamTa
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static USER_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, UserModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static LIVESTREAM_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, LivestreamModel>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static TAG_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, TagModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Debug, thiserror::Error)]
@@ -217,6 +219,8 @@ async fn initialize_handler(
         user_model_cache.clear();
         let mut tag_model_cache = TAG_MODEL_CACHE.lock().await;
         tag_model_cache.clear();
+        let mut livestream_model_cache = LIVESTREAM_MODEL_CACHE.lock().await;
+        livestream_model_cache.clear();
     }
 
     for sql in &index_sqls {
@@ -466,7 +470,7 @@ struct ReserveLivestreamRequest {
     end_at: i64,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct LivestreamModel {
     id: i64,
     user_id: i64,
@@ -1389,22 +1393,37 @@ async fn moderate_handler(
     ))
 }
 
+async fn get_livestream_model(
+    tx: &mut MySqlConnection,
+    user_id: i64,
+) -> sqlx::Result<LivestreamModel> {
+    {
+        let cache = LIVESTREAM_MODEL_CACHE.lock().await;
+        if let Some(livestream) = cache.get(&user_id) {
+            return Ok(livestream.clone());
+        }
+    }
+    let livestream: LivestreamModel = sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    {
+        let mut cache = LIVESTREAM_MODEL_CACHE.lock().await;
+        cache.insert(user_id, livestream.clone());
+    }
+    Ok(livestream)
+}
+
 async fn fill_livecomment_response(
     tx: &mut MySqlConnection,
     iconhash_cache: &Arc<Mutex<HashMap<i64, String>>>,
     livecomment_model: LivecommentModel,
 ) -> sqlx::Result<Livecomment> {
-    let comment_owner_model: UserModel = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(livecomment_model.user_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let comment_owner_model = get_user_model(&mut *tx, livecomment_model.user_id).await?;
     let comment_owner = fill_user_response(&mut *tx, iconhash_cache, comment_owner_model).await?;
 
-    let livestream_model: LivestreamModel =
-        sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
-            .bind(livecomment_model.livestream_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let livestream_model = get_livestream_model(&mut *tx, livecomment_model.livestream_id).await?;
     let livestream = fill_livestream_response(&mut *tx, iconhash_cache, livestream_model).await?;
 
     Ok(Livecomment {
@@ -1444,7 +1463,7 @@ async fn fill_livecomment_report_response(
     })
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct ReactionModel {
     id: i64,
     emoji_name: String,
