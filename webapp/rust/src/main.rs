@@ -27,6 +27,8 @@ static LIVESTREAM_TAGS_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, Vec<LivestreamTa
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static USER_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, UserModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static THEME_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, ThemeModel>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static LIVESTREAM_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, LivestreamModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static TAG_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, TagModel>>> =
@@ -217,6 +219,8 @@ async fn initialize_handler(
         tag_cache.clear();
         let mut user_model_cache = USER_MODEL_CACHE.lock().await;
         user_model_cache.clear();
+        let mut theme_model_cache = THEME_MODEL_CACHE.lock().await;
+        theme_model_cache.clear();
         let mut tag_model_cache = TAG_MODEL_CACHE.lock().await;
         tag_model_cache.clear();
         let mut livestream_model_cache = LIVESTREAM_MODEL_CACHE.lock().await;
@@ -427,6 +431,25 @@ async fn get_tag_handler(
     Ok(axum::Json(TagsResponse { tags }))
 }
 
+async fn get_theme_model(tx: &mut MySqlConnection, user_id: i64) -> sqlx::Result<ThemeModel> {
+    {
+        let cache = THEME_MODEL_CACHE.lock().await;
+        if let Some(theme) = cache.get(&user_id) {
+            return Ok(theme.clone());
+        }
+    }
+    let theme: ThemeModel = sqlx::query_as("SELECT * FROM themes WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    {
+        let mut cache = THEME_MODEL_CACHE.lock().await;
+        cache.insert(user_id, theme.clone());
+    }
+    Ok(theme)
+}
+
 // 配信者のテーマ取得API
 // GET /api/user/:username/theme
 async fn get_streamer_theme_handler(
@@ -446,10 +469,7 @@ async fn get_streamer_theme_handler(
             "not found user that has the given username".into(),
         ))?;
 
-    let theme_model: ThemeModel = sqlx::query_as("SELECT * FROM themes WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let theme_model = get_theme_model(&mut *tx, user_id).await?;
 
     tx.commit().await?;
 
@@ -1634,7 +1654,7 @@ struct Theme {
     dark_mode: bool,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct ThemeModel {
     id: i64,
     #[allow(unused)]
@@ -2092,10 +2112,7 @@ async fn fill_user_response(
     iconhash_cache: &Arc<Mutex<HashMap<i64, String>>>,
     user_model: UserModel,
 ) -> sqlx::Result<User> {
-    let theme_model: ThemeModel = sqlx::query_as("SELECT * FROM themes WHERE user_id = ?")
-        .bind(user_model.id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let theme_model = get_theme_model(&mut *tx, user_model.id).await?;
 
     let icon_hash = match get_hash(&mut *tx, iconhash_cache, user_model.id).await {
         Ok(hash) => hash,
