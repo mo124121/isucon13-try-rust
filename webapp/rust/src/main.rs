@@ -27,6 +27,8 @@ static LIVESTREAM_TAGS_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, Vec<LivestreamTa
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static USER_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, UserModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static USER_NAME_ID_CACHE: LazyLock<Mutex<HashMap<String, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static THEME_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, ThemeModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static LIVESTREAM_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, LivestreamModel>>> =
@@ -227,6 +229,10 @@ async fn initialize_handler(
         tag_model_cache.clear();
         let mut livestream_model_cache = LIVESTREAM_MODEL_CACHE.lock().await;
         livestream_model_cache.clear();
+    }
+    {
+        let mut cache = USER_NAME_ID_CACHE.lock().await;
+        cache.clear();
     }
 
     for sql in &index_sqls {
@@ -463,13 +469,7 @@ async fn get_streamer_theme_handler(
 
     let mut tx = pool.begin().await?;
 
-    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE name = ?")
-        .bind(username)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::NotFound(
-            "not found user that has the given username".into(),
-        ))?;
+    let user_id: i64 = get_user_id(&mut *tx, username).await?;
 
     let theme_model = get_theme_model(&mut *tx, user_id).await?;
 
@@ -787,11 +787,7 @@ async fn get_user_livestreams_handler(
 
     let mut tx = pool.begin().await?;
 
-    let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
-        .bind(username)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::NotFound("user not found".into()))?;
+    let user = get_user_model_from_name(&mut *&mut tx, username).await?;
 
     let livestream_models: Vec<LivestreamModel> =
         sqlx::query_as("SELECT * FROM livestreams WHERE user_id = ?")
@@ -989,6 +985,25 @@ async fn get_user_model(tx: &mut MySqlConnection, user_id: i64) -> sqlx::Result<
     }
     Ok(user)
 }
+async fn get_user_id(tx: &mut MySqlConnection, username: String) -> sqlx::Result<i64> {
+    {
+        let cache = USER_NAME_ID_CACHE.lock().await;
+        if let Some(id) = cache.get(&username) {
+            return Ok(*id);
+        }
+    }
+    let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
+        .bind(&username)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    {
+        let mut cache = USER_NAME_ID_CACHE.lock().await;
+        cache.insert(username, user.id);
+    }
+    Ok(user.id)
+}
+
 async fn get_tag_model(tx: &mut MySqlConnection, tag_id: i64) -> sqlx::Result<TagModel> {
     {
         let cache = TAG_MODEL_CACHE.lock().await;
@@ -1463,10 +1478,7 @@ async fn fill_livecomment_report_response(
     iconhash_cache: &Arc<Mutex<HashMap<i64, String>>>,
     report_model: LivecommentReportModel,
 ) -> sqlx::Result<LivecommentReport> {
-    let reporter_model: UserModel = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(report_model.user_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let reporter_model = get_user_model(&mut *tx, report_model.user_id).await?;
     let reporter = fill_user_response(&mut *tx, iconhash_cache, reporter_model).await?;
 
     let livecomment_model: LivecommentModel =
@@ -1606,10 +1618,7 @@ async fn fill_reaction_response(
     iconhash_cache: &Arc<Mutex<HashMap<i64, String>>>,
     reaction_model: ReactionModel,
 ) -> sqlx::Result<Reaction> {
-    let user_model: UserModel = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(reaction_model.user_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let user_model = get_user_model(&mut *tx, reaction_model.user_id).await?;
     let user = fill_user_response(&mut *tx, iconhash_cache, user_model).await?;
 
     let livestream_model: LivestreamModel =
@@ -1761,33 +1770,17 @@ async fn get_hash(
 
 async fn get_user_model_from_name(
     conn: &mut MySqlConnection,
-    username_usermodel_cache: Arc<Mutex<HashMap<String, UserModel>>>,
     username: String,
 ) -> Result<UserModel, Error> {
-    {
-        let username_usermodel_cache = username_usermodel_cache.lock().await;
-        if let Some(user) = username_usermodel_cache.get(&username) {
-            return Ok(user.clone());
-        }
-    }
+    let user_id = get_user_id(&mut *conn, username).await?;
 
-    // トランザクションを使用してユーザーを取得
-    let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
-        .bind(&username)
-        .fetch_one(&mut *conn) // 引数として渡す
-        .await?;
+    let user = get_user_model(&mut *conn, user_id).await?;
 
-    // キャッシュに追加
-    {
-        let mut username_usermodel_cache = username_usermodel_cache.lock().await;
-        username_usermodel_cache.insert(username.clone(), user.clone());
-    }
     Ok(user)
 }
 async fn get_icon_handler(
     State(AppState {
         pool,
-        username_usermodel_cache,
         iconhash_cache,
         ..
     }): State<AppState>,
@@ -1796,7 +1789,7 @@ async fn get_icon_handler(
 ) -> Result<Response, Error> {
     let mut tx = pool.begin().await?;
 
-    let user = get_user_model_from_name(&mut *tx, username_usermodel_cache, username).await?;
+    let user = get_user_model_from_name(&mut *tx, username).await?;
 
     // 通常のアイコン画像のハッシュを取得
     let hash = match get_hash(&mut *tx, &iconhash_cache, user.id).await {
@@ -1922,13 +1915,7 @@ async fn get_me_handler(
 
     let mut tx = pool.begin().await?;
 
-    let user_model: UserModel = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(user_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::NotFound(
-            "not found user that has the userid in session".into(),
-        ))?;
+    let user_model = get_user_model(&mut *tx, user_id).await?;
 
     let user = fill_user_response(&mut tx, &iconhash_cache, user_model).await?;
 
@@ -2218,11 +2205,7 @@ async fn get_user_statistics_handler(
 
     let mut tx = pool.begin().await?;
 
-    let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
-        .bind(&username)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::BadRequest("".into()))?;
+    let user_id = get_user_id(&mut *&mut tx, username.clone()).await?;
 
     // ランク算出
     let query = r#"
@@ -2289,7 +2272,7 @@ async fn get_user_statistics_handler(
     WHERE u.id = ?
     #";
     let MysqlDecimal(viewers_count) = sqlx::query_scalar(query)
-        .bind(&user.id)
+        .bind(user_id)
         .fetch_one(&mut *tx)
         .await?;
 
