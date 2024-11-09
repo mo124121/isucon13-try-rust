@@ -1,7 +1,7 @@
 use async_session::{CookieStore, SessionStore};
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, request, HeaderMap, StatusCode};
+use axum::http::{header, request, response, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum_extra::extract::cookie::SignedCookieJar;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
@@ -1671,7 +1671,7 @@ async fn get_hash(
     conn: &mut MySqlConnection,
     iconhash_cache: &Arc<Mutex<HashMap<i64, String>>>,
     user_id: i64,
-) -> Result<String, Error> {
+) -> sqlx::Result<String> {
     {
         let iconhash_cache = iconhash_cache.lock().await;
         if let Some(hash) = iconhash_cache.get(&user_id) {
@@ -1686,15 +1686,10 @@ async fn get_hash(
         .await?;
 
     // 画像が存在しない場合のエラーハンドリング
-    let image = match image {
-        Some(image) => image,
-        None => {
-            return Err(Error::NotFound("".into()));
-        }
+    let hash = match image {
+        Some(image) => calc_sha256(&image),
+        None => ONCE.get_or_init(get_fallback_icon_hash).await.clone(),
     };
-
-    // SHA-256ハッシュを計算
-    let hash = calc_sha256(&image);
 
     // キャッシュにハッシュを追加
     {
@@ -1729,37 +1724,7 @@ async fn get_icon_handler(
     let user = get_user_model_from_name(&mut *tx, username).await?;
 
     // 通常のアイコン画像のハッシュを取得
-    let hash = match get_hash(&mut *tx, &iconhash_cache, user.id).await {
-        Ok(hash) => hash,
-        Err(_e) => {
-            // フォールバックアイコンのハッシュを取得
-            let fallback_hash = ONCE.get_or_init(get_fallback_icon_hash).await;
-            let hash = fallback_hash.clone();
-
-            // リクエストヘッダーからIf-None-Matchを取得
-            if let Some(if_none_match) = headers.get(axum::http::header::IF_NONE_MATCH) {
-                if let Ok(if_none_match_str) = if_none_match.to_str() {
-                    let if_none_match_str = if_none_match_str.trim_matches('"');
-                    // ハッシュを比較
-                    if if_none_match_str == hash {
-                        // 一致する場合は304 Not Modifiedを返す
-                        return Ok(Response::builder()
-                            .status(StatusCode::NOT_MODIFIED)
-                            .body(Body::empty())
-                            .unwrap()
-                            .into_response());
-                    }
-                }
-            }
-
-            // フォールバック画像を返す
-            let stream =
-                tokio_util::io::ReaderStream::new(tokio::fs::File::open(FALLBACK_IMAGE).await?);
-            let body = axum::body::StreamBody::new(stream);
-            let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
-            return Ok((response_headers, body).into_response());
-        }
-    };
+    let hash = get_hash(&mut *tx, &iconhash_cache, user.id).await?;
 
     // リクエストヘッダーからIf-None-Matchを取得
     if let Some(if_none_match) = headers.get(axum::http::header::IF_NONE_MATCH) {
@@ -1778,14 +1743,25 @@ async fn get_icon_handler(
     }
 
     // 通常のアイコン画像を返す
-    let image_data: Vec<u8> = sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
-        .bind(user.id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::NotFound("Icon not found".into()))?; // アイコンが見つからない場合のエラーハンドリング
+    let image_data: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
+            .bind(user.id)
+            .fetch_optional(&mut *tx)
+            .await?;
 
+    match image_data {
+        Some(image_data) => {
+            let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
+            return Ok((response_headers, image_data).into_response());
+        }
+        _ => {}
+    };
+
+    // フォールバック画像を返す
     let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
-    Ok((response_headers, image_data).into_response())
+    let stream = tokio_util::io::ReaderStream::new(tokio::fs::File::open(FALLBACK_IMAGE).await?);
+    let body = axum::body::StreamBody::new(stream);
+    Ok((response_headers, body).into_response())
 }
 
 async fn post_icon_handler(
@@ -2040,11 +2016,7 @@ async fn fill_user_response(
 ) -> sqlx::Result<User> {
     let theme_model = get_theme_model(&mut *tx, user_model.id).await?;
 
-    let icon_hash = match get_hash(&mut *tx, iconhash_cache, user_model.id).await {
-        Ok(hash) => hash,
-        Err(_e) => ONCE.get_or_init(get_fallback_icon_hash).await.clone(),
-    };
-
+    let icon_hash = get_hash(&mut *tx, iconhash_cache, user_model.id).await?;
     Ok(User {
         id: user_model.id,
         name: user_model.name,
