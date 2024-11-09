@@ -1,0 +1,28 @@
+- name: Install lmdb backend
+  become: true
+  ansible.builtin.apt:
+    name:
+      - pdns-backend-lmdb
+    state: present
+    update_cache: true
+  notify: restart_pdns
+
+- name: Deploy config
+  become: true
+  copy:
+    src: "{{ item }}"
+    dest: "/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: restart_pdns
+  with_items:
+    - etc/powerdns/pdns.conf
+
+- name: Remove mysql config
+  become: true
+  ansible.builtin.file:
+    state: absent
+    path: /etc/powerdns/pdns.d/gmysql-host.conf
+

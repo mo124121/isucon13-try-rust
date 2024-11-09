@@ -1,0 +1,24 @@
+- name: Can be touch everyone
+  become: true
+  ansible.builtin.file:
+    path: /var/lib/powerdns
+    recurse: true
+    mode: 0777
+  listen: restart_pdns
+
+
+- name: Restart pdns
+  become: true
+  systemd:
+    name: pdns
+    state: restarted
+    daemon_reload: true
+  listen: restart_pdns
+
+- name: Can be touch everyone 2
+  become: true
+  ansible.builtin.file:
+    path: /var/lib/powerdns
+    recurse: true
+    mode: 0777
+  listen: restart_pdns
