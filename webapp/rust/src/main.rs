@@ -21,6 +21,7 @@ const DEFUALT_SESSION_EXPIRES_KEY: &str = "EXPIRES";
 const DEFAULT_USER_ID_KEY: &str = "USERID";
 const DEFAULT_USERNAME_KEY: &str = "USERNAME";
 const FALLBACK_IMAGE: &str = "../img/NoImage.jpg";
+const SLOT_SIZE: i64 = 3600;
 
 static ONCE: OnceCell<String> = OnceCell::const_new();
 static LIVESTREAM_TAGS_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, Vec<LivestreamTagModel>>>> =
@@ -213,6 +214,9 @@ async fn initialize_handler(
         "CREATE INDEX user_id_idx ON livestreams (user_id);",
         "CREATE INDEX livestream_id_idx ON livecomments (livestream_id)",
         "CREATE INDEX user_id_livestream_id_idx ON ng_words (user_id, livestream_id)",
+        "CREATE INDEX livestream_id_idx ON reactions (livestream_id)",
+        "CREATE INDEX start_idx ON reservation_slots (start_at)",
+        "CREATE INDEX time_idx ON reservation_slots (start_at, end_at)",
     ];
     //cacheのクリア
     {
@@ -581,10 +585,10 @@ async fn reserve_livestream_handler(
     // 予約枠をみて、予約が可能か調べる
     // NOTE: 並列な予約のoverbooking防止にFOR UPDATEが必要
     let slots: Vec<ReservationSlotModel> = sqlx::query_as(
-        "SELECT * FROM reservation_slots WHERE start_at >= ? AND end_at <= ? FOR UPDATE",
+        "SELECT * FROM reservation_slots WHERE start_at >= ? AND start_at <= ? FOR UPDATE",
     )
     .bind(req.start_at)
-    .bind(req.end_at)
+    .bind(req.end_at - SLOT_SIZE)
     .fetch_all(&mut *tx)
     .await
     .map_err(|e| {
@@ -619,11 +623,13 @@ async fn reserve_livestream_handler(
         }
     }
 
-    sqlx::query("UPDATE reservation_slots SET slot = slot - 1 WHERE start_at >= ? AND end_at <= ?")
-        .bind(req.start_at)
-        .bind(req.end_at)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE reservation_slots SET slot = slot - 1 WHERE start_at >= ? AND start_at <= ?",
+    )
+    .bind(req.start_at)
+    .bind(req.end_at - SLOT_SIZE)
+    .execute(&mut *tx)
+    .await?;
 
     let rs = sqlx::query("INSERT INTO livestreams (user_id, title, description, playlist_url, thumbnail_url, start_at, end_at) VALUES(?, ?, ?, ?, ?, ?, ?)")
         .bind(user_id)
