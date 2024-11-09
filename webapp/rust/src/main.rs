@@ -1211,22 +1211,9 @@ async fn post_livecomment_handler(
             .bind(livestream_model.id)
             .fetch_all(&mut *tx)
             .await?;
+
     for ngword in &ngwords {
-        let query = r#"
-        SELECT COUNT(*)
-        FROM
-        (SELECT ? AS text) AS texts
-        INNER JOIN
-        (SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
-        ON texts.text LIKE patterns.pattern;
-        "#;
-        let hit_spam: i64 = sqlx::query_scalar(query)
-            .bind(&req.comment)
-            .bind(&ngword.word)
-            .fetch_one(&mut *tx)
-            .await?;
-        tracing::info!("[hit_spam={}] comment = {}", hit_spam, req.comment);
-        if hit_spam >= 1 {
+        if req.comment.contains(&ngword.word) {
             return Err(Error::BadRequest(
                 "このコメントがスパム判定されました".into(),
             ));
@@ -1358,46 +1345,22 @@ async fn moderate_handler(
     )
     .bind(user_id)
     .bind(livestream_id)
-    .bind(req.ng_word)
+    .bind(req.ng_word.clone())
     .bind(created_at)
     .execute(&mut *tx)
     .await?;
     let word_id = rs.last_insert_id() as i64;
 
-    let ngwords: Vec<NgWord> = sqlx::query_as("SELECT * FROM ng_words WHERE livestream_id = ?")
+    let query = r#"
+    DELETE FROM livecomments
+    WHERE livestream_id = ? AND
+    comment LIKE CONCAT('%', ?, '%')
+    "#;
+    sqlx::query(query)
         .bind(livestream_id)
-        .fetch_all(&mut *tx)
+        .bind(req.ng_word)
+        .execute(&mut *tx)
         .await?;
-
-    // NGワードにヒットする過去の投稿も全削除する
-    for ngword in ngwords {
-        // ライブコメント一覧取得
-        let livecomments: Vec<LivecommentModel> = sqlx::query_as("SELECT * FROM livecomments")
-            .fetch_all(&mut *tx)
-            .await?;
-
-        for livecomment in livecomments {
-            let query = r#"
-            DELETE FROM livecomments
-            WHERE
-            id = ? AND
-            livestream_id = ? AND
-            (SELECT COUNT(*)
-            FROM
-            (SELECT ? AS text) AS texts
-            INNER JOIN
-            (SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
-            ON texts.text LIKE patterns.pattern) >= 1
-            "#;
-            sqlx::query(query)
-                .bind(livecomment.id)
-                .bind(livestream_id)
-                .bind(livecomment.comment)
-                .bind(&ngword.word)
-                .execute(&mut *tx)
-                .await?;
-        }
-    }
 
     tx.commit().await?;
 
