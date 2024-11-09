@@ -212,6 +212,7 @@ async fn initialize_handler(
         "CREATE INDEX user_id_idx ON themes (user_id);",
         "CREATE INDEX user_id_idx ON livestreams (user_id);",
         "CREATE INDEX livestream_id_idx ON livecomments (livestream_id)",
+"CREATE INDEX user_id_livestream_id_idx ON ng_words (user_id, livestream_id)",
     ];
     //cacheのクリア
     {
