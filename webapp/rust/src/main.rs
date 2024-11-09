@@ -212,7 +212,7 @@ async fn initialize_handler(
         "CREATE INDEX user_id_idx ON themes (user_id);",
         "CREATE INDEX user_id_idx ON livestreams (user_id);",
         "CREATE INDEX livestream_id_idx ON livecomments (livestream_id)",
-"CREATE INDEX user_id_livestream_id_idx ON ng_words (user_id, livestream_id)",
+        "CREATE INDEX user_id_livestream_id_idx ON ng_words (user_id, livestream_id)",
     ];
     //cacheのクリア
     {
@@ -718,10 +718,8 @@ async fn search_livestreams_handler(
 
         let mut livestream_models = Vec::new();
         for key_tagged_livestream in key_tagged_livestreams {
-            let ls = sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
-                .bind(key_tagged_livestream.livestream_id)
-                .fetch_one(&mut *tx)
-                .await?;
+            let ls = get_livestream_model(&mut *tx, key_tagged_livestream.livestream_id).await?;
+
             livestream_models.push(ls);
         }
         livestream_models
@@ -879,14 +877,7 @@ async fn get_livestream_handler(
 
     let mut tx = pool.begin().await?;
 
-    let livestream_model: LivestreamModel =
-        sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
-            .bind(livestream_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::NotFound(
-                "not found livestream that has the given id".into(),
-            ))?;
+    let livestream_model = get_livestream_model(&mut *tx, livestream_id).await?;
 
     let livestream = fill_livestream_response(&mut tx, &iconhash_cache, livestream_model).await?;
 
@@ -915,11 +906,7 @@ async fn get_livecomment_reports_handler(
 
     let mut tx = pool.begin().await?;
 
-    let livestream_model: LivestreamModel =
-        sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
-            .bind(livestream_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let livestream_model = get_livestream_model(&mut *tx, livestream_id).await?;
 
     if livestream_model.user_id != user_id {
         return Err(Error::Forbidden(
@@ -1209,12 +1196,7 @@ async fn post_livecomment_handler(
 
     let mut tx = pool.begin().await?;
 
-    let livestream_model: LivestreamModel =
-        sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
-            .bind(livestream_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::NotFound("livestream not found".into()))?;
+    let livestream_model = get_livestream_model(&mut *tx, livestream_id).await?;
 
     // スパム判定
     let ngwords: Vec<NgWord> =
@@ -1297,18 +1279,6 @@ async fn report_livecomment_handler(
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
     let mut tx = pool.begin().await?;
-
-    let _: LivestreamModel = sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
-        .bind(livestream_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::NotFound("livestream not found".into()))?;
-
-    let _: LivecommentModel = sqlx::query_as("SELECT * FROM livecomments WHERE id = ?")
-        .bind(livecomment_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::NotFound("livecomment not found".into()))?;
 
     let now = Utc::now().timestamp();
     let rs = sqlx::query(
@@ -1433,22 +1403,22 @@ async fn moderate_handler(
 
 async fn get_livestream_model(
     tx: &mut MySqlConnection,
-    user_id: i64,
+    livestream_id: i64,
 ) -> sqlx::Result<LivestreamModel> {
     {
         let cache = LIVESTREAM_MODEL_CACHE.lock().await;
-        if let Some(livestream) = cache.get(&user_id) {
+        if let Some(livestream) = cache.get(&livestream_id) {
             return Ok(livestream.clone());
         }
     }
     let livestream: LivestreamModel = sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
-        .bind(user_id)
+        .bind(livestream_id)
         .fetch_one(&mut *tx)
         .await?;
 
     {
         let mut cache = LIVESTREAM_MODEL_CACHE.lock().await;
-        cache.insert(user_id, livestream.clone());
+        cache.insert(livestream_id, livestream.clone());
     }
     Ok(livestream)
 }
@@ -1622,11 +1592,8 @@ async fn fill_reaction_response(
     let user_model = get_user_model(&mut *tx, reaction_model.user_id).await?;
     let user = fill_user_response(&mut *tx, iconhash_cache, user_model).await?;
 
-    let livestream_model: LivestreamModel =
-        sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
-            .bind(reaction_model.livestream_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let livestream_model = get_livestream_model(&mut *tx, reaction_model.livestream_id).await?;
+
     let livestream = fill_livestream_response(&mut *tx, iconhash_cache, livestream_model).await?;
 
     Ok(Reaction {
