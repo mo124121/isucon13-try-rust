@@ -17,8 +17,8 @@
   args:
     executable: /bin/bash
   vars:
-    nameserver_ip: "{{ internal_ips.S1 }}"
-    webapp_ip: "{{ internal_ips.S1 }}"
+    nameserver_ip: "{{ pdns_ip }}"
+    webapp_ip: "{{ nginx_ip }}"
 
 - name: Fetch the log file to the local machine
   fetch:
