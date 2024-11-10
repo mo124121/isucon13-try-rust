@@ -1,0 +1,6 @@
+- name: Deploy db config
+  hosts: db
+  tasks:
+    - name: Import db role
+      ansible.builtin.import_role:
+        name: db
