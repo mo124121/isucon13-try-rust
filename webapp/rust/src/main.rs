@@ -5,7 +5,7 @@ use axum::http::{header, request, response, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum_extra::extract::cookie::SignedCookieJar;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use hyper::{Client, Uri};
+use hyper::{Client, Method, Request, Uri};
 use sha2::{Digest, Sha256};
 use sqlx::mysql::{MySqlConnection, MySqlPool};
 use std::borrow::Cow;
@@ -46,6 +46,8 @@ enum Error {
     Bcrypt(#[from] bcrypt::BcryptError),
     #[error("async-session error: {0}")]
     AsyncSession(#[from] async_session::Error),
+    #[error("hyper error: {0}")]
+    HyperClientError(#[from] hyper::Error),
     #[error("{0}")]
     BadRequest(Cow<'static, str>),
     #[error("session error")]
@@ -75,6 +77,7 @@ impl axum::response::IntoResponse for Error {
             | Self::Sqlx(_)
             | Self::Bcrypt(_)
             | Self::AsyncSession(_)
+            | Self::HyperClientError(_)
             | Self::InternalServerError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -94,6 +97,7 @@ struct AppState {
     pool: MySqlPool,
     key: axum_extra::extract::cookie::Key,
     powerdns_subdomain_address: Arc<String>,
+    powerdns_address: Arc<String>,
     username_usermodel_cache: Arc<Mutex<HashMap<String, UserModel>>>,
     iconhash_cache: Arc<Mutex<HashMap<i64, String>>>,
 }
@@ -282,6 +286,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             POWERDNS_SUBDOMAIN_ADDRESS_ENV_KEY
         );
     };
+    const POWERDNS_ADDRESS: &str = "ISUCON13_POWERDNS_ADDRESS";
+    let Ok(powerdns_address) = std::env::var("ISUCON13_POWERDNS_ADDRESS") else {
+        panic!("environ {} must be provided", POWERDNS_ADDRESS);
+    };
 
     let app = axum::Router::new()
         // 初期化
@@ -363,6 +371,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         // user
         .route("/api/register", axum::routing::post(register_handler))
+        .route(
+            "/api/internal/arecord/:username",
+            axum::routing::post(arecord_handler),
+        )
         .route("/api/login", axum::routing::post(login_handler))
         .route("/api/user/me", axum::routing::get(get_me_handler))
         // フロントエンドで、配信予約のコラボレーターを指定する際に必要
@@ -388,6 +400,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pool,
             key: axum_extra::extract::cookie::Key::derive_from(&secret),
             powerdns_subdomain_address: Arc::new(powerdns_subdomain_address),
+            powerdns_address: Arc::new(powerdns_address),
             username_usermodel_cache: Arc::new(Mutex::new(HashMap::new())),
             iconhash_cache: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -1837,12 +1850,40 @@ async fn get_me_handler(
     Ok(axum::Json(user))
 }
 
+// dns登録API
+async fn arecord_handler(
+    State(AppState {
+        powerdns_subdomain_address,
+        ..
+    }): State<AppState>,
+    axum::extract::Path(username): axum::extract::Path<String>,
+) -> Result<StatusCode, Error> {
+    let output = tokio::process::Command::new("pdnsutil")
+        .arg("add-record")
+        .arg("u.isucon.local")
+        .arg(&username)
+        .arg("A")
+        .arg("0")
+        .arg(&*powerdns_subdomain_address)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(Error::InternalServerError(format!(
+            "pdnsutil failed with stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        )));
+    }
+    return Ok(StatusCode::CREATED);
+}
+
 // ユーザ登録API
 // POST /api/register
 async fn register_handler(
     State(AppState {
         pool,
         powerdns_subdomain_address,
+        powerdns_address,
         iconhash_cache,
         ..
     }): State<AppState>,
@@ -1874,20 +1915,21 @@ async fn register_handler(
         .execute(&mut *tx)
         .await?;
 
-    let output = tokio::process::Command::new("pdnsutil")
-        .arg("add-record")
-        .arg("u.isucon.local")
-        .arg(&req.name)
-        .arg("A")
-        .arg("0")
-        .arg(&*powerdns_subdomain_address)
-        .output()
-        .await?;
-    if !output.status.success() {
+    let client = Client::new();
+    let url = format!(
+        "http://{}:8080/api/internal/arecord/{}",
+        powerdns_address, &req.name
+    );
+    let a_req = Request::builder()
+        .method(Method::POST)
+        .uri(url)
+        .body(Body::from(""))
+        .unwrap();
+    let res = client.request(a_req).await?;
+    if res.status() != StatusCode::CREATED {
         return Err(Error::InternalServerError(format!(
-            "pdnsutil failed with stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
+            "fail to create dns record {}",
+            req.name
         )));
     }
 

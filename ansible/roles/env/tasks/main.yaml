@@ -1,8 +1,16 @@
 ---
-- name: Replace ISUCON13_POWERDNS_SUBDOMAIN_ADDRESS with hosts_ips.S1
+- name: Replace ISUCON13_POWERDNS_SUBDOMAIN_ADDRESS
   ansible.builtin.lineinfile:
     path: "/home/isucon/env.sh"
     regexp: '^ISUCON13_POWERDNS_SUBDOMAIN_ADDRESS='
-    line: "ISUCON13_POWERDNS_SUBDOMAIN_ADDRESS={{ internal_ips.S1  }}"
+    line: "ISUCON13_POWERDNS_SUBDOMAIN_ADDRESS={{ nginx_ip }}"
+    backup: true  # 変更前にバックアップを作成します
+  notify: restart_webapp  # 必要に応じてサービス再起動等のアクションを追加
+
+- name: Replace ISUCON13_POWERDNS_SUBDOMAIN_ADDRESS
+  ansible.builtin.lineinfile:
+    path: "/home/isucon/env.sh"
+    regexp: '^ISUCON13_POWERDNS_ADDRESS='
+    line: "ISUCON13_POWERDNS_ADDRESS={{ pdns_ip }}"
     backup: true  # 変更前にバックアップを作成します
   notify: restart_webapp  # 必要に応じてサービス再起動等のアクションを追加
