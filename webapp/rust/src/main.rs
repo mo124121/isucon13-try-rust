@@ -11,6 +11,8 @@ use sqlx::mysql::{MySqlConnection, MySqlPool};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, OnceCell};
 use uuid::Uuid;
 
@@ -21,6 +23,7 @@ const DEFUALT_SESSION_EXPIRES_KEY: &str = "EXPIRES";
 const DEFAULT_USER_ID_KEY: &str = "USERID";
 const DEFAULT_USERNAME_KEY: &str = "USERNAME";
 const FALLBACK_IMAGE: &str = "../img/NoImage.jpg";
+const ICON_DIR: &str = "/home/isucon/webapp/public/icons/";
 const SLOT_SIZE: i64 = 3600;
 
 static ONCE: OnceCell<String> = OnceCell::const_new();
@@ -267,6 +270,15 @@ async fn initialize_handler(
             return Err(Error::Sqlx(err));
         }
     }
+
+    //iconディレクトリの初期化
+    if let Err(err) = clear_directory(&ICON_DIR) {
+        return Err(Error::InternalServerError(format!(
+            "failed to reset icon dir: {}",
+            err
+        )));
+    }
+
     //測定開始
     let client = Client::new();
     let _res = client
@@ -1714,16 +1726,18 @@ async fn get_hash(
         }
     }
 
-    // データベースから画像を取得
-    let image: Option<Vec<u8>> = sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_optional(&mut *conn)
-        .await?;
+    // ファイルから画像を取得
+    let target = format!(
+        "{}{}.jpg",
+        ICON_DIR,
+        get_user_model(&mut *conn, user_id).await?.name
+    );
+    let image = fs::read(target).await;
 
     // 画像が存在しない場合のエラーハンドリング
     let hash = match image {
-        Some(image) => calc_sha256(&image),
-        None => ONCE.get_or_init(get_fallback_icon_hash).await.clone(),
+        Ok(image) => calc_sha256(&image),
+        _ => ONCE.get_or_init(get_fallback_icon_hash).await.clone(),
     };
 
     // キャッシュにハッシュを追加
@@ -1756,7 +1770,7 @@ async fn get_icon_handler(
 ) -> Result<Response, Error> {
     let mut tx = pool.begin().await?;
 
-    let user = get_user_model_from_name(&mut *tx, username).await?;
+    let user = get_user_model_from_name(&mut *tx, username.clone()).await?;
 
     // 通常のアイコン画像のハッシュを取得
     let hash = get_hash(&mut *tx, &iconhash_cache, user.id).await?;
@@ -1777,26 +1791,18 @@ async fn get_icon_handler(
         }
     }
 
-    // 通常のアイコン画像を返す
-    let image_data: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
-            .bind(user.id)
-            .fetch_optional(&mut *tx)
-            .await?;
-
-    match image_data {
-        Some(image_data) => {
-            let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
-            return Ok((response_headers, image_data).into_response());
+    let image_data = {
+        if hash == ONCE.get_or_init(get_fallback_icon_hash).await.clone() {
+            fs::read(FALLBACK_IMAGE).await?
+        } else {
+            let target = format!("{}{}.jpg", ICON_DIR, username);
+            fs::read(target).await?
         }
-        _ => {}
     };
 
     // フォールバック画像を返す
     let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
-    let stream = tokio_util::io::ReaderStream::new(tokio::fs::File::open(FALLBACK_IMAGE).await?);
-    let body = axum::body::StreamBody::new(stream);
-    Ok((response_headers, body).into_response())
+    Ok((response_headers, image_data).into_response())
 }
 
 async fn post_icon_handler(
@@ -1818,30 +1824,36 @@ async fn post_icon_handler(
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
     let mut tx = pool.begin().await?;
-
-    sqlx::query("DELETE FROM icons WHERE user_id = ?")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-
-    let rs = sqlx::query("INSERT INTO icons (user_id, image) VALUES (?, ?)")
-        .bind(user_id)
-        .bind(req.image)
-        .execute(&mut *tx)
-        .await?;
-    let icon_id = rs.last_insert_id() as i64;
-
-    tx.commit().await?;
-
     {
         let mut iconhash_cache = iconhash_cache.lock().await;
         iconhash_cache.remove(&user_id);
     }
+    let target = format!(
+        "{}{}.jpg",
+        ICON_DIR,
+        get_user_model(&mut *tx, user_id).await?.name
+    );
+    println!("{}", &target);
+    let mut file = fs::File::create(&target).await?;
+    println!("{}", &target);
+    file.write_all(&req.image).await?;
 
-    Ok((
-        StatusCode::CREATED,
-        axum::Json(PostIconResponse { id: icon_id }),
-    ))
+    tx.commit().await?;
+
+    Ok((StatusCode::CREATED, axum::Json(PostIconResponse { id: 1 })))
+}
+
+fn clear_directory(dir_path: &str) -> std::io::Result<()> {
+    let path = std::path::Path::new(dir_path);
+
+    // ディレクトリが存在する場合は削除
+    if path.exists() {
+        std::fs::remove_dir_all(path)?; // ディレクトリとその中身を全て削除
+    }
+
+    // 新たにディレクトリを再作成
+    std::fs::create_dir(path)?;
+    Ok(())
 }
 
 async fn get_me_handler(
