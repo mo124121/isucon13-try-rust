@@ -37,6 +37,8 @@ static THEME_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, ThemeModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static LIVESTREAM_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, LivestreamModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static LIVECOMMENT_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, LivecommentModel>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static TAG_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, TagModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Debug, thiserror::Error)]
@@ -242,6 +244,7 @@ async fn initialize_handler(
         "CREATE INDEX livestream_id_idx ON reactions (livestream_id)",
         "CREATE INDEX start_idx ON reservation_slots (start_at)",
         "CREATE INDEX time_idx ON reservation_slots (start_at, end_at)",
+        "CREATE INDEX livestream_id_idx ON livecomment_reports (livestream_id)",
     ];
     //cacheのクリア
     {
@@ -264,7 +267,10 @@ async fn initialize_handler(
         let mut cache = USER_NAME_ID_CACHE.lock().await;
         cache.clear();
     }
-
+    {
+        let mut cache = LIVECOMMENT_MODEL_CACHE.lock().await;
+        cache.clear();
+    }
     for sql in &index_sqls {
         if let Err(err) = utils::db::create_index_if_not_exists(&pool, sql).await {
             return Err(Error::Sqlx(err));
@@ -1082,7 +1088,7 @@ struct PostLivecommentRequest {
     tip: i64,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct LivecommentModel {
     id: i64,
     user_id: i64,
@@ -1440,6 +1446,28 @@ async fn fill_livecomment_response(
     })
 }
 
+async fn get_livecomment_model(
+    tx: &mut MySqlConnection,
+    livecomment_id: i64,
+) -> sqlx::Result<LivecommentModel> {
+    {
+        let cache = LIVECOMMENT_MODEL_CACHE.lock().await;
+        if let Some(livecomment) = cache.get(&livecomment_id) {
+            return Ok(livecomment.clone());
+        }
+    }
+    let livecomment: LivecommentModel = sqlx::query_as("SELECT * FROM livecomments WHERE id = ?")
+        .bind(livecomment_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    {
+        let mut cache = LIVECOMMENT_MODEL_CACHE.lock().await;
+        cache.insert(livecomment_id, livecomment.clone());
+    }
+    Ok(livecomment)
+}
+
 async fn fill_livecomment_report_response(
     tx: &mut MySqlConnection,
     iconhash_cache: &Arc<Mutex<HashMap<i64, String>>>,
@@ -1448,11 +1476,7 @@ async fn fill_livecomment_report_response(
     let reporter_model = get_user_model(&mut *tx, report_model.user_id).await?;
     let reporter = fill_user_response(&mut *tx, iconhash_cache, reporter_model).await?;
 
-    let livecomment_model: LivecommentModel =
-        sqlx::query_as("SELECT * FROM livecomments WHERE id = ?")
-            .bind(report_model.livecomment_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let livecomment_model = get_livecomment_model(&mut *tx, report_model.livecomment_id).await?;
     let livecomment =
         fill_livecomment_response(&mut *tx, iconhash_cache, livecomment_model).await?;
 
