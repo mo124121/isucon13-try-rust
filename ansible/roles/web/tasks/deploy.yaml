@@ -1,0 +1,19 @@
+- name: Create target directory if it doesn't exist
+  become_user: isucon
+  ansible.builtin.file:
+    path: /home/isucon/webapp/rust/target/release
+    state: directory
+    mode: "0755"
+
+- name: Copy isupipe binary
+  become_user: isucon
+  ansible.builtin.copy:
+    src: ../webapp/rust/target/release/isupipe
+    dest: /home/isucon/webapp/rust/target/release/isupipe
+    mode: "0755"
+  notify: restart_webapp
+
+- name: Stop isupipe-go service
+  ansible.builtin.systemd:
+    name: isupipe-go.service
+    state: stopped
