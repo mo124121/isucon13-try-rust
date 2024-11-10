@@ -195,11 +195,29 @@ fn build_mysql_options() -> sqlx::mysql::MySqlConnectOptions {
 async fn initialize_handler(
     State(AppState {
         pool,
+        powerdns_address,
         username_usermodel_cache,
         iconhash_cache,
         ..
     }): State<AppState>,
 ) -> Result<axum::Json<InitializeResponse>, Error> {
+    let client = Client::new();
+    let url = format!(
+        "http://{}:8080/api/internal/arecord/reset",
+        powerdns_address
+    );
+    let a_req = Request::builder()
+        .method(Method::POST)
+        .uri(url)
+        .body(Body::from(""))
+        .unwrap();
+    let res = client.request(a_req).await?;
+    if res.status() != StatusCode::CREATED {
+        return Err(Error::InternalServerError(format!(
+            "fail to reset dns records",
+        )));
+    }
+
     let output = tokio::process::Command::new("../sql/init.sh")
         .output()
         .await?;
@@ -374,6 +392,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/internal/arecord/:username",
             axum::routing::post(arecord_handler),
+        )
+        .route(
+            "/api/internal/arecord/reset",
+            axum::routing::post(reset_dns_handler),
         )
         .route("/api/login", axum::routing::post(login_handler))
         .route("/api/user/me", axum::routing::get(get_me_handler))
@@ -1870,6 +1892,20 @@ async fn arecord_handler(
     if !output.status.success() {
         return Err(Error::InternalServerError(format!(
             "pdnsutil failed with stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        )));
+    }
+    return Ok(StatusCode::CREATED);
+}
+// dns初期化用API
+async fn reset_dns_handler() -> Result<StatusCode, Error> {
+    let output = tokio::process::Command::new("../sql/init.sh")
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(Error::InternalServerError(format!(
+            "init.sh failed with stdout={} stderr={}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         )));
