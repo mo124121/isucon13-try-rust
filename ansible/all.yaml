@@ -1,0 +1,7 @@
+---
+- name: Env
+  ansible.builtin.import_playbook: env.yaml
+- name: Pdns
+  ansible.builtin.import_playbook: pdns.yaml
+- name: Web
+  ansible.builtin.import_playbook: web.yaml

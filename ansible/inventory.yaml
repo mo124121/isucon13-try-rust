@@ -5,9 +5,9 @@ all:
       S2: isucon-server2
       B: isucon-server3
     internal_ips:
-      S1: 172.31.39.69
-      S2: 172.31.39.254
-      B: 172.31.45.186
+      S1: 172.31.34.205
+      S2: 172.31.37.56
+      B: 172.31.38.134
     ansible_user: ubuntu
     ansible_ssh_private_key_file: ~/.ssh/wsl.pem
   children:

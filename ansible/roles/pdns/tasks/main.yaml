@@ -26,3 +26,7 @@
     state: absent
     path: /etc/powerdns/pdns.d/gmysql-host.conf
 
+- name: Init DNS
+  become: true
+  ansible.builtin.shell:
+    cmd: /home/isucon/webapp/pdns/init_zone.sh

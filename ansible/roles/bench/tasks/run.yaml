@@ -1,0 +1,27 @@
+- name: Generate consistent log timestamp
+  set_fact:
+    log_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+
+- name: Genelate log file name
+  set_fact:
+    log_file: "/tmp/output_{{ log_timestamp }}.log"
+
+- name: Run bench and save output to a timestamped log file
+  ansible.builtin.shell: |
+    /home/isucon/bench run \
+      --target https://pipe.u.isucon.local \
+      --nameserver {{ nameserver_ip }} \
+      --webapp {{ webapp_ip }} \
+      --enable-ssl \
+      > {{ log_file }} 2>&1
+  args:
+    executable: /bin/bash
+  vars:
+    nameserver_ip: "{{ internal_ips.S1 }}"
+    webapp_ip: "{{ internal_ips.S1 }}"
+
+- name: Fetch the log file to the local machine
+  fetch:
+    src: "{{ log_file }}"
+    dest: "../logs/"
+    flat: true
