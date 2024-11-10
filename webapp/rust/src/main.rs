@@ -631,43 +631,23 @@ async fn reserve_livestream_handler(
 
     // 予約枠をみて、予約が可能か調べる
     // NOTE: 並列な予約のoverbooking防止にFOR UPDATEが必要
-    let slots: Vec<ReservationSlotModel> = sqlx::query_as(
-        "SELECT * FROM reservation_slots WHERE start_at >= ? AND start_at <= ? FOR UPDATE",
+    let MysqlDecimal(min_count) = sqlx::query_scalar(
+        "SELECT MIN(slot) FROM reservation_slots WHERE start_at>= ? AND start_at <= ? FOR UPDATE",
     )
     .bind(req.start_at)
     .bind(req.end_at - SLOT_SIZE)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|e| {
-        tracing::warn!("予約枠一覧取得でエラー発生: {e:?}");
-        e
-    })?;
-    for slot in slots {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT slot FROM reservation_slots WHERE start_at = ? AND end_at = ?",
-        )
-        .bind(slot.start_at)
-        .bind(slot.end_at)
-        .fetch_one(&mut *tx)
-        .await?;
-        tracing::info!(
-            "{} ~ {}予約枠の残数 = {}",
-            slot.start_at,
-            slot.end_at,
-            slot.slot
-        );
-        if count < 1 {
-            return Err(Error::BadRequest(
-                format!(
-                    "予約期間 {} ~ {}に対して、予約区間 {} ~ {}が予約できません",
-                    term_start_at.timestamp(),
-                    term_end_at.timestamp(),
-                    req.start_at,
-                    req.end_at
-                )
-                .into(),
-            ));
-        }
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if min_count < 1 {
+        return Err(Error::BadRequest(
+            format!(
+                "予約期間 {} ~ {}に対して、予約区間が予約できません",
+                term_start_at.timestamp(),
+                term_end_at.timestamp()
+            )
+            .into(),
+        ));
     }
 
     sqlx::query(
