@@ -41,6 +41,8 @@ static LIVECOMMENT_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, LivecommentModel>>> 
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static TAG_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, TagModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static NG_WORDS_CACHE: LazyLock<Mutex<HashMap<i64, Vec<NgWord>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("I/O error: {0}")]
@@ -240,7 +242,7 @@ async fn initialize_handler(
         "CREATE INDEX user_id_idx ON themes (user_id);",
         "CREATE INDEX user_id_idx ON livestreams (user_id);",
         "CREATE INDEX livestream_id_idx ON livecomments (livestream_id)",
-        "CREATE INDEX user_id_livestream_id_idx ON ng_words (user_id, livestream_id)",
+        "CREATE INDEX livestream_id_idx ON ng_words (livestream_id)",
         "CREATE INDEX livestream_id_idx ON reactions (livestream_id)",
         "CREATE INDEX start_idx ON reservation_slots (start_at)",
         "CREATE INDEX time_idx ON reservation_slots (start_at, end_at)",
@@ -271,6 +273,11 @@ async fn initialize_handler(
         let mut cache = LIVECOMMENT_MODEL_CACHE.lock().await;
         cache.clear();
     }
+    {
+        let mut cache = NG_WORDS_CACHE.lock().await;
+        cache.clear();
+    }
+
     for sql in &index_sqls {
         if let Err(err) = utils::db::create_index_if_not_exists(&pool, sql).await {
             return Err(Error::Sqlx(err));
@@ -1133,7 +1140,7 @@ struct ModerateRequest {
     ng_word: String,
 }
 
-#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, serde::Serialize, sqlx::FromRow, Clone)]
 struct NgWord {
     id: i64,
     user_id: i64,
@@ -1216,6 +1223,30 @@ async fn get_ngwords(
     Ok(axum::Json(ng_words))
 }
 
+async fn get_ngwords_from_id(
+    tx: &mut MySqlConnection,
+    livestream_id: i64,
+) -> sqlx::Result<Vec<NgWord>> {
+    {
+        let cache = NG_WORDS_CACHE.lock().await;
+        if let Some(livestream) = cache.get(&livestream_id) {
+            return Ok(livestream.clone());
+        }
+    }
+    let ng_words: Vec<NgWord> = sqlx::query_as(
+        "SELECT id, user_id, livestream_id, word FROM ng_words WHERE  livestream_id = ?",
+    )
+    .bind(livestream_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    {
+        let mut cache = NG_WORDS_CACHE.lock().await;
+        cache.insert(livestream_id, ng_words.clone());
+    }
+    Ok(ng_words)
+}
+
 async fn post_livecomment_handler(
     State(AppState {
         pool,
@@ -1240,12 +1271,7 @@ async fn post_livecomment_handler(
     let livestream_model = get_livestream_model(&mut *tx, livestream_id).await?;
 
     // スパム判定
-    let ngwords: Vec<NgWord> =
-        sqlx::query_as("SELECT id, user_id, livestream_id, word FROM ng_words WHERE user_id = ? AND livestream_id = ?")
-            .bind(livestream_model.user_id)
-            .bind(livestream_model.id)
-            .fetch_all(&mut *tx)
-            .await?;
+    let ngwords = get_ngwords_from_id(&mut *tx, livestream_model.id).await?;
 
     for ngword in &ngwords {
         if req.comment.contains(&ngword.word) {
@@ -1398,6 +1424,11 @@ async fn moderate_handler(
         .await?;
 
     tx.commit().await?;
+
+    {
+        let mut cache = NG_WORDS_CACHE.lock().await;
+        cache.remove(&livestream_id);
+    }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
