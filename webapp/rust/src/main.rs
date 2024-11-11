@@ -1795,18 +1795,20 @@ async fn get_icon_handler(
         }
     }
 
-    let image_data = {
-        if hash == ONCE.get_or_init(get_fallback_icon_hash).await.clone() {
-            fs::read(FALLBACK_IMAGE).await?
+    let path = {
+        if hash != ONCE.get_or_init(get_fallback_icon_hash).await.clone() {
+            format!("{}{}.jpg", ICON_DIR, user.name)
         } else {
-            let target = format!("{}{}.jpg", ICON_DIR, username);
-            fs::read(target).await?
+            "/home/isucon/webapp/img/NoImage.jpg".to_string()
         }
     };
-
-    // フォールバック画像を返す
-    let response_headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
-    Ok((response_headers, image_data).into_response())
+    Ok(Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "image/jpeg")
+        .header("X-Accel-Redirect", path)
+        .status(StatusCode::ACCEPTED)
+        .body(Body::empty())
+        .unwrap()
+        .into_response())
 }
 
 async fn post_icon_handler(

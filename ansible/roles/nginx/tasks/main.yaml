@@ -1,0 +1,11 @@
+- name: Deploy config
+  become: true
+  copy:
+    src: "../webapp/nginx/{{ item }}"
+    dest: "/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart_nginx
+  with_items:
+    - etc/nginx/sites-enabled/isupipe.conf
