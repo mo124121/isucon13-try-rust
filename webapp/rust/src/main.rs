@@ -5,7 +5,7 @@ use axum::http::{header, request, response, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum_extra::extract::cookie::SignedCookieJar;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use hyper::{Client, Method, Request, Uri};
+use reqwest::{Client, Request};
 use sha2::{Digest, Sha256};
 use sqlx::mysql::{MySqlConnection, MySqlPool};
 use std::borrow::Cow;
@@ -55,6 +55,8 @@ enum Error {
     AsyncSession(#[from] async_session::Error),
     #[error("hyper error: {0}")]
     HyperClientError(#[from] hyper::Error),
+    #[error("reqwest error: {0}")]
+    ReqwestClientError(#[from] reqwest::Error),
     #[error("{0}")]
     BadRequest(Cow<'static, str>),
     #[error("session error")]
@@ -85,6 +87,7 @@ impl axum::response::IntoResponse for Error {
             | Self::Bcrypt(_)
             | Self::AsyncSession(_)
             | Self::HyperClientError(_)
+            | Self::ReqwestClientError(_)
             | Self::InternalServerError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -209,17 +212,14 @@ async fn initialize_handler(
     }): State<AppState>,
 ) -> Result<axum::Json<InitializeResponse>, Error> {
     let client = Client::new();
+
+    //A recordのリセット
     let url = format!(
         "http://{}:8080/api/internal/arecord/reset",
         powerdns_address
     );
-    let a_req = Request::builder()
-        .method(Method::POST)
-        .uri(url)
-        .body(Body::from(""))
-        .unwrap();
-    let res = client.request(a_req).await?;
-    if res.status() != StatusCode::CREATED {
+    let res = client.post(url).body("").send().await?;
+    if res.status() != reqwest::StatusCode::CREATED {
         return Err(Error::InternalServerError(format!(
             "fail to reset dns records",
         )));
@@ -293,9 +293,9 @@ async fn initialize_handler(
     }
 
     //測定開始
-    let client = Client::new();
+    let client = hyper::Client::new();
     let _res = client
-        .get(Uri::from_static(
+        .get(hyper::Uri::from_static(
             "http://isucon-o11y:9000/api/group/collect",
         ))
         .await;
@@ -2009,13 +2009,8 @@ async fn register_handler(
         "http://{}:8080/api/internal/arecord/{}",
         powerdns_address, &req.name
     );
-    let a_req = Request::builder()
-        .method(Method::POST)
-        .uri(url)
-        .body(Body::from(""))
-        .unwrap();
-    let res = client.request(a_req).await?;
-    if res.status() != StatusCode::CREATED {
+        let res = client.post(url).body("").send().await?;
+    if res.status() != reqwest::StatusCode::CREATED {
         return Err(Error::InternalServerError(format!(
             "fail to create dns record {}",
             req.name
