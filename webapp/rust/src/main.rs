@@ -41,6 +41,8 @@ static LIVECOMMENT_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, LivecommentModel>>> 
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static TAG_MODEL_CACHE: LazyLock<Mutex<HashMap<i64, TagModel>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static TAG_NAME_ID_CACHE: LazyLock<Mutex<HashMap<String, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static NG_WORDS_CACHE: LazyLock<Mutex<HashMap<i64, Vec<NgWord>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Debug, thiserror::Error)]
@@ -252,11 +254,14 @@ async fn initialize_handler(
         "CREATE INDEX user_id_idx ON themes (user_id);",
         "CREATE INDEX user_id_idx ON livestreams (user_id);",
         "CREATE INDEX livestream_id_idx ON livecomments (livestream_id)",
+        "CREATE INDEX livestream_id_time_idx ON livecomments (livestream_id, created_at DESC)",
         "CREATE INDEX livestream_id_idx ON ng_words (livestream_id)",
         "CREATE INDEX livestream_id_idx ON reactions (livestream_id)",
+        "CREATE INDEX livestream_id_time_idx ON reactions (livestream_id, created_at DESC)",
         "CREATE INDEX start_idx ON reservation_slots (start_at)",
         "CREATE INDEX time_idx ON reservation_slots (start_at, end_at)",
         "CREATE INDEX livestream_id_idx ON livecomment_reports (livestream_id)",
+        "CREATE INDEX tag_id_livestream_id_idx ON livestream_tags (tag_id, livestream_id DESC)",
     ];
     //cacheのクリア
     {
@@ -274,6 +279,10 @@ async fn initialize_handler(
         tag_model_cache.clear();
         let mut livestream_model_cache = LIVESTREAM_MODEL_CACHE.lock().await;
         livestream_model_cache.clear();
+    }
+    {
+        let mut cache = TAG_NAME_ID_CACHE.lock().await;
+        cache.clear();
     }
     {
         let mut cache = USER_NAME_ID_CACHE.lock().await;
@@ -745,6 +754,25 @@ struct SearchLivestreamsQuery {
     limit: String,
 }
 
+async fn get_tag_id(tx: &mut MySqlConnection, tagname: String) -> sqlx::Result<i64> {
+    {
+        let cache = TAG_NAME_ID_CACHE.lock().await;
+        if let Some(id) = cache.get(&tagname) {
+            return Ok(*id);
+        }
+    }
+    let user: TagModel = sqlx::query_as("SELECT * FROM tags WHERE name = ?")
+        .bind(&tagname)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    {
+        let mut cache = TAG_NAME_ID_CACHE.lock().await;
+        cache.insert(tagname, user.id);
+    }
+    Ok(user.id)
+}
+
 async fn search_livestreams_handler(
     State(AppState {
         pool,
@@ -770,21 +798,13 @@ async fn search_livestreams_handler(
         sqlx::query_as(&query).fetch_all(&mut *tx).await?
     } else {
         // タグによる取得
-        let tag_id_list: Vec<i64> = sqlx::query_scalar("SELECT id FROM tags WHERE name = ?")
-            .bind(key_tag_name)
+        let tag_id = get_tag_id(&mut *tx, key_tag_name).await?;
+        let query = "SELECT * FROM livestream_tags FORCE INDEX (tag_id_livestream_id_idx) WHERE tag_id = ? ORDER BY livestream_id DESC";
+
+        let key_tagged_livestreams: Vec<LivestreamTagModel> = sqlx::query_as(query)
+            .bind(tag_id)
             .fetch_all(&mut *tx)
             .await?;
-
-        let mut query_builder = sqlx::query_builder::QueryBuilder::new(
-            "SELECT * FROM livestream_tags WHERE tag_id IN (",
-        );
-        let mut separated = query_builder.separated(", ");
-        for tag_id in tag_id_list {
-            separated.push_bind(tag_id);
-        }
-        separated.push_unseparated(") ORDER BY livestream_id DESC");
-        let key_tagged_livestreams: Vec<LivestreamTagModel> =
-            query_builder.build_query_as().fetch_all(&mut *tx).await?;
 
         let mut livestream_models = Vec::new();
         for key_tagged_livestream in key_tagged_livestreams {
