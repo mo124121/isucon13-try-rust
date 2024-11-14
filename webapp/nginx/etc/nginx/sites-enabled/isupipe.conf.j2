@@ -1,3 +1,14 @@
+upstream main {
+  server {{ main_web_ip }}:8080;
+  keepalive_requests 1000000;
+  keepalive 100;
+}
+upstream sub {
+  server {{ sub_web_ip }}:8080;
+  keepalive_requests 1000000;
+  keepalive 100;
+}
+
 server {
   listen 80 default_server;
   server_name _;
@@ -43,7 +54,7 @@ server {
   }
   location /api {
     proxy_set_header Host $host;
-    proxy_pass http://localhost:8080;
+    proxy_pass http://main;
   }
   location /home/isucon/webapp/img/ {
     internal;
@@ -54,6 +65,10 @@ server {
     internal;
     open_file_cache max=100;
     alias /home/isucon/webapp/public/icons/;
+  }
+  location ~ ^/api/user/[0-9a-zA-Z_-]+/icon$ {
+    proxy_set_header Host $host;
+    proxy_pass http://sub;
   }
 }
 

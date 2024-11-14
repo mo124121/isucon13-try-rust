@@ -11,3 +11,4 @@
     - 'localhost'
     - "{{ internal_ips.S1 }}"
     - "{{ internal_ips.S2 }}"
+    - "{{ internal_ips.S3 }}"

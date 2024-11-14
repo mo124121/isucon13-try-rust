@@ -1,7 +1,7 @@
 - name: Deploy config
   become: true
-  copy:
-    src: "../webapp/nginx/{{ item }}"
+  ansible.builtin.template:
+    src: "../webapp/nginx/{{ item }}.j2"
     dest: "/{{ item }}"
     owner: root
     group: root

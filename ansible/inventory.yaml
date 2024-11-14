@@ -3,14 +3,18 @@ all:
     hosts_ips:
       S1: isucon-server1
       S2: isucon-server2
-      B: isucon-server3
+      S3: isucon-server3
+      B: isucon-server4
     internal_ips:
-      S1: 172.31.47.41
-      S2: 172.31.37.70
-      B: 172.31.44.133
+      S1: 172.31.44.158
+      S2: 172.31.45.237
+      S3: 172.31.40.41
+      B: 172.31.40.151
     nginx_ip: "{{ internal_ips.S1 }}"
     pdns_ip: "{{ internal_ips.S2 }}"
     db_ip: "{{ internal_ips.S2 }}"
+    main_web_ip: "{{ internal_ips.S3 }}"
+    sub_web_ip: "{{ internal_ips.S1 }}"
     ansible_user: ubuntu
     ansible_ssh_private_key_file: ~/.ssh/wsl.pem
   children:
@@ -26,6 +30,8 @@ all:
               ansible_host: "{{ hosts_ips.S1 }}"
             webapp02:
               ansible_host: "{{ hosts_ips.S2 }}"
+            webapp03:
+              ansible_host: "{{ hosts_ips.S3 }}"
         db:
           hosts:
             db:

@@ -108,6 +108,7 @@ struct AppState {
     key: axum_extra::extract::cookie::Key,
     powerdns_subdomain_address: Arc<String>,
     powerdns_address: Arc<String>,
+    subweb_address: Arc<String>,
     username_usermodel_cache: Arc<Mutex<HashMap<String, UserModel>>>,
     iconhash_cache: Arc<Mutex<HashMap<i64, String>>>,
 }
@@ -206,6 +207,7 @@ async fn initialize_handler(
     State(AppState {
         pool,
         powerdns_address,
+        subweb_address,
         username_usermodel_cache,
         iconhash_cache,
         ..
@@ -225,6 +227,14 @@ async fn initialize_handler(
         )));
     }
 
+    //iconを管理しているサブアプリのiconファイルのリセット
+    let url = format!("http://{}:8080/api/internal/icons/reset", subweb_address);
+    let res = client.post(url).body("").send().await?;
+    if res.status() != reqwest::StatusCode::OK {
+        return Err(Error::InternalServerError(format!("fail to reset icons",)));
+    }
+
+    //DBのリセット
     let output = tokio::process::Command::new("../sql/init.sh")
         .output()
         .await?;
@@ -333,7 +343,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Ok(powerdns_address) = std::env::var("ISUCON13_POWERDNS_ADDRESS") else {
         panic!("environ {} must be provided", POWERDNS_ADDRESS);
     };
-
+    const SUBWEB_ADDRESS: &str = "ISUCON13_SUBWEB_ADDRESS";
+    let Ok(subweb_address) = std::env::var("ISUCON13_SUBWEB_ADDRESS") else {
+        panic!("environ {} must be provided", SUBWEB_ADDRESS);
+    };
     let app = axum::Router::new()
         // 初期化
         .route("/api/initialize", axum::routing::post(initialize_handler))
@@ -435,6 +448,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::get(get_icon_handler),
         )
         .route("/api/icon", axum::routing::post(post_icon_handler))
+        .route(
+            "/api/internal/icon",
+            axum::routing::post(post_internal_icon_handler),
+        )
+        .route(
+            "/api/internal/icons/reset",
+            axum::routing::post(internal_reset_icon_handler),
+        )
         // stats
         // ライブ配信統計情報
         .route(
@@ -448,6 +469,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             key: axum_extra::extract::cookie::Key::derive_from(&secret),
             powerdns_subdomain_address: Arc::new(powerdns_subdomain_address),
             powerdns_address: Arc::new(powerdns_address),
+            subweb_address: Arc::new(subweb_address),
             username_usermodel_cache: Arc::new(Mutex::new(HashMap::new())),
             iconhash_cache: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -1723,6 +1745,11 @@ struct PostIconRequest {
     #[serde(deserialize_with = "from_base64")]
     image: Vec<u8>,
 }
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct PostInternalIconRequest {
+    image: Vec<u8>,
+    userid: i64,
+}
 fn from_base64<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1846,9 +1873,66 @@ async fn get_icon_handler(
         .into_response())
 }
 
+async fn internal_reset_icon_handler(
+    State(AppState { iconhash_cache, .. }): State<AppState>,
+) -> Result<StatusCode, Error> {
+    //iconディレクトリの初期化
+    if let Err(err) = clear_directory(&ICON_DIR) {
+        return Err(Error::InternalServerError(format!(
+            "failed to reset icon dir: {}",
+            err
+        )));
+    }
+    //iconハッシュの削除
+    //cacheのクリア
+    {
+        let mut iconhash_cache = iconhash_cache.lock().await;
+        iconhash_cache.clear();
+    }
+    {
+        let mut user_model_cache = USER_MODEL_CACHE.lock().await;
+        user_model_cache.clear();
+    }
+    {
+        let mut cache = USER_NAME_ID_CACHE.lock().await;
+        cache.clear();
+    }
+    Ok(StatusCode::OK)
+}
+
+async fn post_internal_icon_handler(
+    State(AppState {
+        pool,
+        iconhash_cache,
+        ..
+    }): State<AppState>,
+    axum::Json(req): axum::Json<PostInternalIconRequest>,
+) -> Result<StatusCode, Error> {
+    let user_id = req.userid;
+    let mut tx = pool.begin().await?;
+    {
+        let mut iconhash_cache = iconhash_cache.lock().await;
+        iconhash_cache.remove(&user_id);
+    }
+    let target = format!(
+        "{}{}.jpg",
+        ICON_DIR,
+        get_user_model(&mut *tx, user_id).await?.name
+    );
+    println!("{}", &target);
+    let mut file = fs::File::create(&target).await?;
+    println!("{}", &target);
+    file.write_all(&req.image).await?;
+
+    tx.commit().await?;
+
+    Ok(StatusCode::CREATED)
+}
+
 async fn post_icon_handler(
     State(AppState {
         pool,
+        subweb_address,
         iconhash_cache,
         ..
     }): State<AppState>,
@@ -1865,6 +1949,20 @@ async fn post_icon_handler(
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
     let mut tx = pool.begin().await?;
+    let client = Client::new();
+    let req = PostInternalIconRequest {
+        image: req.image,
+        userid: user_id,
+    };
+    let url = format!("http://{}:8080/api/internal/icon", subweb_address);
+    let res = client.post(url).json(&req).send().await?;
+
+    if res.status() != reqwest::StatusCode::CREATED {
+        return Err(Error::InternalServerError(format!(
+            "failed to post icon for user id {}",
+            user_id
+        )));
+    }
     {
         let mut iconhash_cache = iconhash_cache.lock().await;
         iconhash_cache.remove(&user_id);
@@ -1971,7 +2069,6 @@ async fn reset_dns_handler() -> Result<StatusCode, Error> {
 async fn register_handler(
     State(AppState {
         pool,
-        powerdns_subdomain_address,
         powerdns_address,
         iconhash_cache,
         ..
@@ -2009,7 +2106,7 @@ async fn register_handler(
         "http://{}:8080/api/internal/arecord/{}",
         powerdns_address, &req.name
     );
-        let res = client.post(url).body("").send().await?;
+    let res = client.post(url).body("").send().await?;
     if res.status() != reqwest::StatusCode::CREATED {
         return Err(Error::InternalServerError(format!(
             "fail to create dns record {}",

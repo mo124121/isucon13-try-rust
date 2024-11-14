@@ -2,7 +2,7 @@
   set_fact:
     log_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
 
-- name: Genelate log file name
+- name: Generate log file name
   set_fact:
     log_file: "/tmp/output_{{ log_timestamp }}.log"
 
@@ -19,6 +19,14 @@
   vars:
     nameserver_ip: "{{ pdns_ip }}"
     webapp_ip: "{{ nginx_ip }}"
+
+- name: Fetch and display the last 20 lines of the log
+  ansible.builtin.shell: "tail -n 20 {{ log_file }}"
+  register: tail_output
+
+- name: Show the last 20 lines of the log
+  debug:
+    msg: "{{ tail_output.stdout }}"
 
 - name: Fetch the log file to the local machine
   fetch:
