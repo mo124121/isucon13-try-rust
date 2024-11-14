@@ -1410,13 +1410,9 @@ async fn moderate_handler(
     let mut tx = pool.begin().await?;
 
     // 配信者自身の配信に対するmoderateなのかを検証
-    let owned_livestreams: Vec<LivestreamModel> =
-        sqlx::query_as("SELECT * FROM livestreams WHERE id = ? AND user_id = ?")
-            .bind(livestream_id)
-            .bind(user_id)
-            .fetch_all(&mut *tx)
-            .await?;
-    if owned_livestreams.is_empty() {
+    let livestream = get_livestream_model(&mut *tx, livestream_id).await?;
+
+    if user_id != livestream.user_id {
         return Err(Error::BadRequest(
             "A streamer can't moderate livestreams that other streamers own".into(),
         ));
