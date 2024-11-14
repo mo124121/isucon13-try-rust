@@ -743,7 +743,7 @@ async fn reserve_livestream_handler(
 
     tx.commit().await?;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+//     tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
 
     Ok((StatusCode::CREATED, axum::Json(livestream)))
 }
@@ -1470,7 +1470,7 @@ async fn moderate_handler(
         cache.remove(&livestream_id);
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     Ok((
         StatusCode::CREATED,
