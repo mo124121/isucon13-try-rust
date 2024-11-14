@@ -12,3 +12,16 @@
     - "{{ internal_ips.S1 }}"
     - "{{ internal_ips.S2 }}"
     - "{{ internal_ips.S3 }}"
+
+- name: Deploy file
+  become: true
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: restart_db
+  with_items:
+    - etc/mysql/mysql.conf.d/mysqld.cnf

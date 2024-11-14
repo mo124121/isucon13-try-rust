@@ -330,6 +330,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let pool = sqlx::mysql::MySqlPoolOptions::new()
+        .max_connections(64)
+        .idle_timeout(std::time::Duration::from_secs(70))
         .connect_with(build_mysql_options())
         .await
         .expect("failed to connect db");
