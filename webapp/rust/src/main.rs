@@ -45,6 +45,11 @@ static TAG_NAME_ID_CACHE: LazyLock<Mutex<HashMap<String, i64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NG_WORDS_CACHE: LazyLock<Mutex<HashMap<i64, Vec<NgWord>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static USER_SCORE_CACHE: LazyLock<Mutex<HashMap<String, Score>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static LIVESTREAM_SCORE_CACHE: LazyLock<Mutex<HashMap<i64, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("I/O error: {0}")]
@@ -283,17 +288,15 @@ async fn initialize_handler(
     {
         let mut cache = TAG_NAME_ID_CACHE.lock().await;
         cache.clear();
-    }
-    {
         let mut cache = USER_NAME_ID_CACHE.lock().await;
         cache.clear();
-    }
-    {
         let mut cache = LIVECOMMENT_MODEL_CACHE.lock().await;
         cache.clear();
-    }
-    {
         let mut cache = NG_WORDS_CACHE.lock().await;
+        cache.clear();
+        let mut cache = USER_SCORE_CACHE.lock().await;
+        cache.clear();
+        let mut cache = LIVESTREAM_SCORE_CACHE.lock().await;
         cache.clear();
     }
 
@@ -743,7 +746,7 @@ async fn reserve_livestream_handler(
 
     tx.commit().await?;
 
-//     tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+    //     tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
 
     Ok((StatusCode::CREATED, axum::Json(livestream)))
 }
@@ -1457,13 +1460,11 @@ async fn moderate_handler(
     WHERE livestream_id = ? AND
     comment LIKE CONCAT('%', ?, '%')
     "#;
-    sqlx::query(query)
+    let rs = sqlx::query(query)
         .bind(livestream_id)
         .bind(req.ng_word)
         .execute(&mut *tx)
         .await?;
-
-    tx.commit().await?;
 
     {
         let mut cache = NG_WORDS_CACHE.lock().await;
@@ -2301,7 +2302,11 @@ struct UserRankingEntry {
     username: String,
     score: i64,
 }
-
+#[derive(Debug)]
+struct RankingEntry {
+    id: i64,
+    score: i64,
+}
 /// MySQL で COUNT()、SUM() 等を使って DECIMAL 型の値になったものを i64 に変換するための構造体。
 #[derive(Debug)]
 struct MysqlDecimal(i64);
@@ -2342,22 +2347,22 @@ impl From<MysqlDecimal> for i64 {
         value.0
     }
 }
+#[derive(Clone)]
+struct Score {
+    total_comments: i64,
+    total_reactions: i64,
+    total_tips: i64,
+}
 
-async fn get_user_statistics_handler(
-    State(AppState { pool, .. }): State<AppState>,
-    jar: SignedCookieJar,
-    Path((username,)): Path<(String,)>,
-) -> Result<axum::Json<UserStatistics>, Error> {
-    verify_user_session(&jar).await?;
+async fn add_user_score(tx: &mut MySqlConnection, user_id: i64) -> sqlx::Result<_> {}
 
-    // ユーザごとに、紐づく配信について、累計リアクション数、累計ライブコメント数、累計売上金額を算出
-    // また、現在の合計視聴者数もだす
-
-    let mut tx = pool.begin().await?;
-
-    let user_id = get_user_id(&mut *&mut tx, username.clone()).await?;
-
-    // ランク算出
+async fn get_users_score(tx: &mut MySqlConnection) -> sqlx::Result<HashMap<String, Score>> {
+    {
+        let cache = USER_SCORE_CACHE.lock().await;
+        if !cache.is_empty() {
+            return Ok(cache.clone());
+        }
+    }
     let query = r#"
     SELECT u.name, 
            COALESCE(SUM(r.reactions), 0) AS total_reactions,
@@ -2381,36 +2386,70 @@ async fn get_user_statistics_handler(
     let user_stats: Vec<(String, MysqlDecimal, MysqlDecimal, MysqlDecimal)> =
         sqlx::query_as(query).fetch_all(&mut *tx).await?;
 
-    let mut total_livecomments = 0;
-    let mut total_tip = 0;
-    let mut total_reactions = 0;
-    let mut ranking = Vec::new();
-    for (name, reaction, comment, tip) in user_stats {
-        let reaction = i64::from(reaction);
-        let comment = i64::from(comment);
-        let tip = i64::from(tip);
-        let score = reaction + tip;
+    {
+        let mut cache = USER_SCORE_CACHE.lock().await;
 
-        if (name == username) {
-            total_livecomments = comment;
-            total_tip = tip;
-            total_reactions = reaction;
+        for (name, total_reactions, total_comments, total_tips) in user_stats {
+            let total_reactions = i64::from(total_reactions);
+            let total_comments = i64::from(total_comments);
+            let total_tips = i64::from(total_tips);
+            let score = Score {
+                total_comments,
+                total_reactions,
+                total_tips,
+            };
+            if total_tips + total_comments == 0 {
+                continue;
+            }
+            cache.insert(name, score.clone());
         }
+        Ok(cache.clone())
+    }
+}
+async fn get_user_statistics_handler(
+    State(AppState { pool, .. }): State<AppState>,
+    jar: SignedCookieJar,
+    Path((username,)): Path<(String,)>,
+) -> Result<axum::Json<UserStatistics>, Error> {
+    verify_user_session(&jar).await?;
 
+    // ユーザごとに、紐づく配信について、累計リアクション数、累計ライブコメント数、累計売上金額を算出
+    // また、現在の合計視聴者数もだす
+
+    let mut tx = pool.begin().await?;
+
+    let user_id = get_user_id(&mut *&mut tx, username.clone()).await?;
+
+    // ランク算出
+
+    let user_stats = get_users_score(&mut *tx).await?;
+
+    let mut total_livecomments = 0;
+    let mut total_reactions = 0;
+    let mut total_tip = 0;
+
+    if let Some(score) = user_stats.get(&username) {
+        total_livecomments = score.total_comments;
+        total_tip = score.total_tips;
+        total_reactions = score.total_reactions;
+    } else {
+        return Err(Error::InternalServerError(format!(
+            "failed to get user stats {}",
+            username
+        )));
+    }
+    let mut ranking = Vec::new();
+    for (user_id_i, score) in user_stats {
         ranking.push(UserRankingEntry {
-            username: name,
-            score,
+            username: user_id_i,
+            score: score.total_reactions + score.total_tips,
         });
     }
-    ranking.sort_by(|a, b| {
-        a.score
-            .cmp(&b.score)
-            .then_with(|| a.username.cmp(&b.username))
-    });
+    ranking.sort_by(|a, b| a.score.cmp(&b.score).then_with(|| a.id.cmp(&b.id)));
 
     let rpos = ranking
         .iter()
-        .rposition(|entry| entry.username == username)
+        .rposition(|entry| entry.id == user_id)
         .unwrap();
     let rank = (ranking.len() - rpos) as i64;
 
