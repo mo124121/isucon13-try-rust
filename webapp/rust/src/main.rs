@@ -1471,23 +1471,21 @@ async fn moderate_handler(
         .await?;
     let streamowner = get_user_model(&mut *tx, livestream.user_id).await?;
 
-    for livecomment in livecomments {
+    for livecomment in livecomments.iter() {
         add_user_score(&mut *tx, streamowner.name.clone(), -1, 0, livecomment.tip).await?;
     }
-    let query = r#"
-    DELETE FROM livecomments
-    WHERE livestream_id = ? AND
-    comment LIKE CONCAT('%', ?, '%')
-    "#;
-    sqlx::query(query)
-        .bind(livestream_id)
-        .bind(req.ng_word)
-        .execute(&mut *tx)
-        .await?;
-
-    {
-        let mut cache = NG_WORDS_CACHE.lock().await;
-        cache.remove(&livestream_id);
+    // 取得したコメントをまとめて削除
+    if !livecomments.is_empty() {
+        let ids: Vec<i64> = livecomments.iter().map(|model| model.id).collect();
+        let query = format!(
+            "DELETE FROM livecomments WHERE id IN ({})",
+            ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+        );
+        let mut query_builder = sqlx::query(&query);
+        for id in ids {
+            query_builder = query_builder.bind(id);
+        }
+        query_builder.execute(&mut *tx).await?;
     }
 
     tx.commit().await?;
