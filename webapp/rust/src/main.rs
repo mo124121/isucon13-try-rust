@@ -1490,6 +1490,8 @@ async fn moderate_handler(
         cache.remove(&livestream_id);
     }
 
+    tx.commit().await?;
+
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     Ok((
@@ -2446,9 +2448,6 @@ async fn get_users_score(tx: &mut MySqlConnection) -> sqlx::Result<HashMap<Strin
                 total_reactions,
                 total_tips,
             };
-            if total_tips + total_comments == 0 {
-                continue;
-            }
             cache.insert(name, score.clone());
         }
         Ok(cache.clone())
