@@ -1472,7 +1472,7 @@ async fn moderate_handler(
     let streamowner = get_user_model(&mut *tx, livestream.user_id).await?;
 
     for livecomment in livecomments {
-        add_user_score(&mut *tx, streamowner.name.clone(), -1, 0, -livecomment.tip).await?;
+        add_user_score(&mut *tx, streamowner.name.clone(), -1, 0, livecomment.tip).await?;
     }
     let query = r#"
     DELETE FROM livecomments
@@ -2155,6 +2155,8 @@ async fn register_handler(
         )));
     }
 
+    add_user_score(&mut *tx, req.name.clone(), 0, 0, 0).await?;
+
     let user = fill_user_response(
         &mut tx,
         &iconhash_cache,
@@ -2385,10 +2387,14 @@ async fn add_user_score(
 ) -> Result<(), Error> {
     let mut cache = USER_SCORE_CACHE.lock().await;
     if cache.is_empty() {
-        return Err(Error::InternalServerError(format!(
-            "user {} has no score in cache",
-            username
-        )));
+        cache.insert(
+            username.clone(),
+            Score {
+                total_comments: 0,
+                total_reactions: 0,
+                total_tips: 0,
+            },
+        );
     }
     let score = cache.get_mut(&username).unwrap();
     score.total_comments += comment;
