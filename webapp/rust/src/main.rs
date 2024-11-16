@@ -1356,6 +1356,10 @@ async fn post_livecomment_handler(
     )
     .await?;
 
+    let livestream = get_livestream_model(&mut *&mut tx, livestream_id).await?;
+    let streamowner = get_user_model(&mut *tx, livestream.user_id).await?;
+    add_user_score(&mut *tx, streamowner.name, 1, 0, req.tip).await?;
+
     tx.commit().await?;
 
     Ok((StatusCode::CREATED, axum::Json(livecomment)))
@@ -1456,11 +1460,26 @@ async fn moderate_handler(
     let word_id = rs.last_insert_id() as i64;
 
     let query = r#"
+    SELECT * FROM livecomments
+    WHERE livestream_id = ? AND
+    comment LIKE CONCAT('%', ?, '%')
+    "#;
+    let livecomments: Vec<LivecommentModel> = sqlx::query_as(query)
+        .bind(livestream_id)
+        .bind(req.ng_word.clone())
+        .fetch_all(&mut *tx)
+        .await?;
+    let streamowner = get_user_model(&mut *tx, livestream.user_id).await?;
+
+    for livecomment in livecomments {
+        add_user_score(&mut *tx, streamowner.name.clone(), -1, 0, -livecomment.tip).await?;
+    }
+    let query = r#"
     DELETE FROM livecomments
     WHERE livestream_id = ? AND
     comment LIKE CONCAT('%', ?, '%')
     "#;
-    let rs = sqlx::query(query)
+    sqlx::query(query)
         .bind(livestream_id)
         .bind(req.ng_word)
         .execute(&mut *tx)
@@ -1675,6 +1694,9 @@ async fn post_reaction_handler(
     )
     .await?;
 
+    let livestream = get_livestream_model(&mut *&mut tx, livestream_id).await?;
+    let streamowner = get_user_model(&mut *tx, livestream.user_id).await?;
+    add_user_score(&mut *tx, streamowner.name, 0, 1, 0).await?;
     tx.commit().await?;
 
     Ok((StatusCode::CREATED, axum::Json(reaction)))
@@ -2354,7 +2376,27 @@ struct Score {
     total_tips: i64,
 }
 
-async fn add_user_score(tx: &mut MySqlConnection, user_id: i64) -> sqlx::Result<_> {}
+async fn add_user_score(
+    tx: &mut MySqlConnection,
+    username: String,
+    comment: i64,
+    reaction: i64,
+    tip: i64,
+) -> Result<(), Error> {
+    let mut cache = USER_SCORE_CACHE.lock().await;
+    if cache.is_empty() {
+        return Err(Error::InternalServerError(format!(
+            "user {} has no score in cache",
+            username
+        )));
+    }
+    let score = cache.get_mut(&username).unwrap();
+    score.total_comments += comment;
+    score.total_reactions += reaction;
+    score.total_tips += tip;
+
+    Ok(())
+}
 
 async fn get_users_score(tx: &mut MySqlConnection) -> sqlx::Result<HashMap<String, Score>> {
     {
@@ -2445,11 +2487,15 @@ async fn get_user_statistics_handler(
             score: score.total_reactions + score.total_tips,
         });
     }
-    ranking.sort_by(|a, b| a.score.cmp(&b.score).then_with(|| a.id.cmp(&b.id)));
+    ranking.sort_by(|a, b| {
+        a.score
+            .cmp(&b.score)
+            .then_with(|| a.username.cmp(&b.username))
+    });
 
     let rpos = ranking
         .iter()
-        .rposition(|entry| entry.id == user_id)
+        .rposition(|entry| entry.username == username)
         .unwrap();
     let rank = (ranking.len() - rpos) as i64;
 
