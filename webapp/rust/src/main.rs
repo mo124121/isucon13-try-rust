@@ -1471,7 +1471,7 @@ async fn moderate_handler(
         .await?;
     let streamowner = get_user_model(&mut *tx, livestream.user_id).await?;
 
-    for livecomment in livecomments.iter() {
+    for livecomment in livecomments.clone() {
         add_user_score(&mut *tx, streamowner.name.clone(), -1, 0, livecomment.tip).await?;
     }
     // 取得したコメントをまとめて削除
