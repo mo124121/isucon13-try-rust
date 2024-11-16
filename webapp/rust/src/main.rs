@@ -2167,11 +2167,10 @@ async fn login_handler(
     let mut tx = pool.begin().await?;
 
     // usernameはUNIQUEなので、whereで一意に特定できる
-    let user_model: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
-        .bind(req.username)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::Unauthorized("invalid username or password".into()))?;
+    let user_model = match get_user_model_from_name(&mut *tx, req.username).await {
+        Ok(user) => user,
+        Err(_) => return Err(Error::Unauthorized("invalid username or password".into())),
+    };
 
     tx.commit().await?;
 
