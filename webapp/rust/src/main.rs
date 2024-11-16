@@ -2388,17 +2388,21 @@ async fn add_user_score(
     tip: i64,
 ) -> Result<(), Error> {
     let mut cache = USER_SCORE_CACHE.lock().await;
-    if cache.is_empty() {
-        cache.insert(
-            username.clone(),
-            Score {
-                total_comments: 0,
-                total_reactions: 0,
-                total_tips: 0,
-            },
-        );
-    }
-    let score = cache.get_mut(&username).unwrap();
+    // if cache.is_empty() {
+    //     cache.insert(
+    //         username.clone(),
+    //         Score {
+    //             total_comments: 0,
+    //             total_reactions: 0,
+    //             total_tips: 0,
+    //         },
+    //     );
+    // }
+    let score = cache.entry(username.clone()).or_insert(Score {
+        total_comments: 0,
+        total_reactions: 0,
+        total_tips: 0,
+    });
     score.total_comments += comment;
     score.total_reactions += reaction;
     score.total_tips += tip;
