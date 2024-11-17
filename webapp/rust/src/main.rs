@@ -2216,13 +2216,14 @@ async fn get_user_handler(
 
     let mut tx = pool.begin().await?;
 
-    let user_model: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
-        .bind(username)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(Error::NotFound(
+    let user_model = match get_user_model_from_name(&mut *tx, username).await {
+        Ok(user) => user,
+        Err(_) => {
+            return Err(Error::NotFound(
             "not found user that has the given username".into(),
-        ))?;
+        ))
+        }
+    };
 
     let user = fill_user_response(&mut tx, &iconhash_cache, user_model).await?;
 
