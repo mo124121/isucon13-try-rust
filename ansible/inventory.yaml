@@ -6,12 +6,12 @@ all:
       S3: isucon-server3
       B: isucon-server4
     internal_ips:
-      S1: 172.31.44.158
-      S2: 172.31.45.237
-      S3: 172.31.40.41
-      B: 172.31.40.151
+      S1: 172.31.43.188
+      S2: 172.31.46.244
+      S3: 172.31.33.83
+      B: 172.31.44.63
     nginx_ip: "{{ internal_ips.S1 }}"
-    pdns_ip: "{{ internal_ips.S2 }}"
+    pdns_ip: "{{ internal_ips.S3 }}"
     db_ip: "{{ internal_ips.S2 }}"
     main_web_ip: "{{ internal_ips.S3 }}"
     sub_web_ip: "{{ internal_ips.S1 }}"
@@ -39,7 +39,7 @@ all:
         pdns:
           hosts:
             pdns01:
-              ansible_host: "{{ hosts_ips.S2 }}"
+              ansible_host: "{{ hosts_ips.S3 }}"
     outsider:
       hosts:
         benchmarker:
