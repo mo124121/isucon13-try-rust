@@ -45,6 +45,8 @@ static TAG_NAME_ID_CACHE: LazyLock<Mutex<HashMap<String, i64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NG_WORDS_CACHE: LazyLock<Mutex<HashMap<i64, Vec<NgWord>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static PASSWORD_CACHE: LazyLock<Mutex<HashMap<i64, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("I/O error: {0}")]
@@ -139,7 +141,7 @@ pub struct ProfileParams {
 
 pub async fn generate_profile(duration: u64) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let guard = ProfilerGuardBuilder::default()
-        .frequency(200)
+        .frequency(1000)
         .blocklist(&["libc", "libgcc", "pthread", "vdso"])
         .build()?;
 
@@ -296,7 +298,10 @@ async fn initialize_handler(
         let mut cache = NG_WORDS_CACHE.lock().await;
         cache.clear();
     }
-
+    {
+        let mut cache = PASSWORD_CACHE.lock().await;
+        cache.clear();
+    }
     for sql in &index_sqls {
         if let Err(err) = utils::db::create_index_if_not_exists(&pool, sql).await {
             return Err(Error::Sqlx(err));
@@ -743,7 +748,7 @@ async fn reserve_livestream_handler(
 
     tx.commit().await?;
 
-//     tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+    //     tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
 
     Ok((StatusCode::CREATED, axum::Json(livestream)))
 }
@@ -2157,6 +2162,28 @@ struct Session {
     expires: i64,
 }
 
+async fn check_password(
+    tx: &mut MySqlConnection,
+    user_id: i64,
+    input_password: String,
+    hashed_password: String,
+) -> Result<bool, Error> {
+    {
+        let cache = PASSWORD_CACHE.lock().await;
+        if let Some(password) = cache.get(&user_id) {
+            return Ok(password.clone() == input_password);
+        }
+    }
+    if !bcrypt::verify(&input_password, &hashed_password)? {
+        return Ok(false);
+    }
+    {
+        let mut cache = PASSWORD_CACHE.lock().await;
+        cache.insert(user_id, input_password);
+    }
+
+    return Ok(true);
+}
 // ユーザログインAPI
 // POST /api/login
 async fn login_handler(
@@ -2172,12 +2199,12 @@ async fn login_handler(
         Err(_) => return Err(Error::Unauthorized("invalid username or password".into())),
     };
 
-    tx.commit().await?;
-
     let hashed_password = user_model.hashed_password.unwrap();
-    if !bcrypt::verify(&req.password, &hashed_password)? {
+    if !check_password(&mut *tx, user_model.id, req.password, hashed_password).await? {
         return Err(Error::Unauthorized("invalid username or password".into()));
     }
+
+    tx.commit().await?;
 
     let session_end_at = Utc::now() + chrono::Duration::hours(1);
     let session_id = Uuid::new_v4().to_string();
@@ -2220,8 +2247,8 @@ async fn get_user_handler(
         Ok(user) => user,
         Err(_) => {
             return Err(Error::NotFound(
-            "not found user that has the given username".into(),
-        ))
+                "not found user that has the given username".into(),
+            ))
         }
     };
 
