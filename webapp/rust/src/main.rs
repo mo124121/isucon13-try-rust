@@ -312,12 +312,12 @@ async fn initialize_handler(
     }
 
     //測定開始
-    let client = hyper::Client::new();
-    let _res = client
-        .get(hyper::Uri::from_static(
-            "http://isucon-o11y:9000/api/group/collect",
-        ))
-        .await;
+    // let client = hyper::Client::new();
+    // let _res = client
+    //     .get(hyper::Uri::from_static(
+    //         "http://isucon-o11y:9000/api/group/collect",
+    //     ))
+    //     .await;
 
     Ok(axum::Json(InitializeResponse { language: "rust" }))
 }
@@ -325,7 +325,7 @@ async fn initialize_handler(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("RUST_LOG").is_none() {
-        std::env::set_var("RUST_LOG", "info,tower_http=debug,axum::rejection=trace");
+        std::env::set_var("RUST_LOG", "none");
     }
     tracing_subscriber::fmt::init();
 
@@ -743,7 +743,7 @@ async fn reserve_livestream_handler(
 
     tx.commit().await?;
 
-//     tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+    //     tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
 
     Ok((StatusCode::CREATED, axum::Json(livestream)))
 }
@@ -1937,9 +1937,8 @@ async fn post_internal_icon_handler(
         ICON_DIR,
         get_user_model(&mut *tx, user_id).await?.name
     );
-    println!("{}", &target);
+
     let mut file = fs::File::create(&target).await?;
-    println!("{}", &target);
     file.write_all(&req.image).await?;
 
     tx.commit().await?;
@@ -1990,9 +1989,7 @@ async fn post_icon_handler(
         ICON_DIR,
         get_user_model(&mut *tx, user_id).await?.name
     );
-    println!("{}", &target);
     let mut file = fs::File::create(&target).await?;
-    println!("{}", &target);
     file.write_all(&req.image).await?;
 
     tx.commit().await?;
@@ -2220,8 +2217,8 @@ async fn get_user_handler(
         Ok(user) => user,
         Err(_) => {
             return Err(Error::NotFound(
-            "not found user that has the given username".into(),
-        ))
+                "not found user that has the given username".into(),
+            ))
         }
     };
 
